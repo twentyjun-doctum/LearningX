@@ -113,10 +113,11 @@ def pptx_media_coverage(path):
 
 def pptx_pages(path):
     from pptx import Presentation
-    from pptx_layout_resolver import extract_visible
+    from pptx_layout_resolver import extract_visible,collect_media_control_images
     prs=Presentation(str(path))
+    playback_icons=collect_media_control_images(prs)
     for i,slide in enumerate(prs.slides):
-        blocks,counts=extract_visible(slide,i+1,prs.slide_width,prs.slide_height)
+        blocks,counts=extract_visible(slide,i+1,prs.slide_width,prs.slide_height,playback_icons)
         notes=''
         try:
             if slide.has_notes_slide:notes=compact(slide.notes_slide.notes_text_frame.text)
