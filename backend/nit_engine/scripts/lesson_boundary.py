@@ -2,15 +2,23 @@
 import re, unicodedata
 from content_roles import get_text
 WEEK=re.compile(r'(?<!\d)(?:제\s*)?([1-9]|1[0-6])\s*차\s*시|(?<!\d)([1-9]|1[0-6])\s*주\s*차|(?<![제\d])([1-9]|1[0-6])\s*강\s*[.:：]?')
-FILE_WEEK=re.compile(r'^0?([1-9]|1[0-6])\s*(?:주\s*차|강)(?!\d)')
+FILE_WEEK=re.compile(r'(?<!\d)(?:제\s*)?0?([1-9]|1[0-6])\s*(?:주\s*차|차\s*시|강)(?!\d)')
 
 
 def detect(pages,filename=''):
     raw_candidates=[]
-    fn=FILE_WEEK.search(unicodedata.normalize("NFKC",filename))
+    filename_norm=unicodedata.normalize("NFKC",filename)
+    filename_matches=list(FILE_WEEK.finditer(filename_norm))
+    distinct_weeks={int(match.group(1)) for match in filename_matches}
+    fn=filename_matches[0] if filename_matches else None
     if fn and pages:
-        raw_candidates.append({'week':int(fn.group(1)),'start_page':1,'status':'filename_candidate_unverified',
-                               'evidence_block_ids':[],'evidence':'filename_week_marker'})
+        raw_candidates.append({'week':int(fn.group(1)),'start_page':1,
+                               'status':('needs_teacher_boundary_review' if len(distinct_weeks)>1
+                                         else 'filename_candidate_unverified'),
+                               'evidence_block_ids':[],
+                               'evidence':'filename_week_marker',
+                               'filename_match_span':list(fn.span()),
+                               'filename_match_text':fn.group(0)})
     for p in pages:
         if p.get('content_role') in ('review_question','administrative_appendix','class_operation','class_activity_question','break','preview') or p.get('hidden_slide'):continue
         candidate=[(b,b.get('text','')) for b in p['blocks'][:6]
