@@ -2,9 +2,9 @@
 import re, unicodedata
 from collections import Counter
 
-KNOWN_LIST_MARKERS={'\uf0fc','\uf0a7','\uf0d8','\uf0b7','\uf0a0','\uf0e0','\uf06c','\uf0b2'}
+KNOWN_LIST_MARKERS={'\uf0fc','\uf0a7','\uf0d8','\uf0b7','\uf0a0','\uf06c','\uf0b2'}
 BAD_SCRIPTS=('ARABIC','HEBREW','CYRILLIC','DEVANAGARI','BENGALI','GURMUKHI','GUJARATI','ORIYA','ODIA','TAMIL','TELUGU','KANNADA','MALAYALAM','SINHALA','THAI','LAO')
-def dangerous_characters(s):
+# U+F0E0 may encode a Wingdings directional arrow, NOT a list bullet.\n# Preserve it and quarantine as ambiguous until a teacher checks the glyph.\nAMBIGUOUS_DIRECTION_GLYPHS={'\uf0e0'}\n\ndef dangerous_characters(s):
     return [c for c in s if c in ('\x00','\ufffd') or
             (unicodedata.category(c) in ('Co','Cs') and c not in KNOWN_LIST_MARKERS) or
             (unicodedata.category(c)=='Cc' and c not in '\n\t\r\v')]
