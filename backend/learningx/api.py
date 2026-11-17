@@ -53,6 +53,7 @@ class EvidenceItem(BaseModel):
 
 class Review(BaseModel):
     items:list[EvidenceItem]=Field(min_length=1,max_length=1000)
+    acknowledge_unprocessed_media:bool=False
 
 class Ask(BaseModel):
     material_id:str=Field(min_length=1,max_length=64)
@@ -177,6 +178,14 @@ def approve(material_id:str,data:Review,db:Session=Depends(session),user:User=De
     if not m:raise HTTPException(404,"Material not found")
     require_course(db,m.course_id,user,"faculty")
     with private_store.material_workspace(m) as out:
+        # The instructor must explicitly acknowledge omitted narration.
+        doc=json.loads((out/"document.json").read_text(encoding="utf-8"))
+        if doc.get("source",{}).get("type")=="pptx":
+            coverage=doc.get("media_coverage")
+            if not isinstance(coverage,dict) or "audio_status" not in coverage:
+                raise HTTPException(503,"PPTX media coverage is not verified")
+            if coverage["audio_status"]=="NOT_ANALYZED" and not data.acknowledge_unprocessed_media:
+                raise HTTPException(409,"PPTX narration is not analyzed; acknowledge before approval")
         result=nit.approve_material(out,user.id,[x.model_dump() for x in data.items])
         private_store.persist_approval(m,out)
     audit(db,user.id,m.course_id,"evidence_signed",m.id,detail=f"count={result['approved']}")
