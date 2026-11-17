@@ -202,7 +202,11 @@ def process_next_job(job_id=None):
             if row and row.status=="READY":return {"result":"ALREADY_READY","job_id":job_id}
             if row and row.status=="FAILED":return {"result":"ALREADY_FAILED","job_id":job_id}
             if row and row.status=="RUNNING":
-                if row.attempts>=MAX_ATTEMPTS:
+                lease=row.lease_until
+                if lease and lease.tzinfo is None:
+                    lease=lease.replace(tzinfo=timezone.utc)
+                if (row.attempts>=MAX_ATTEMPTS and lease
+                        and lease<datetime.now(timezone.utc)):
                     row.status="FAILED";row.error_code="WORKER_TIMEOUT"
                     row.lease_until=None;db.commit()
                     return {"result":"ALREADY_FAILED","job_id":job_id}
