@@ -174,7 +174,8 @@ class BackendTests(unittest.TestCase):
             "AWS_ENDPOINT_URL_S3":"https://test.neon.invalid",
             "AWS_REGION":"ap-southeast-1",
             "NIT_STORAGE_BUCKET":"learningx-private-lessons",
-            "NIT_WORKER_SECRET":"workers-can-run-only-with-this-secret-123"}
+            "NIT_WORKER_SECRET":"workers-can-run-only-with-this-secret-123",
+            "NIT_QUEUE_ENABLED":"1"}
         fake=FakeS3()
         store=PrivateArtifactStore.__new__(PrivateArtifactStore)
         store.bucket="learningx-private-lessons"
@@ -195,7 +196,10 @@ class BackendTests(unittest.TestCase):
         def coach(out,student,question,policy,teacher_approved):
             self.assertTrue((out/"approved_evidence.json").is_file())
             return {"mode":"COACHED","follow_up_question":"비교 기준을 어떻게 정의할까요?","evidence_refs":[]}
+        from unittest.mock import AsyncMock
+        from learningx import ingest_queue
         with patch.dict(os.environ,env), \
+             patch.object(ingest_queue,"_dispatch_job",new_callable=AsyncMock) as dispatch, \
              patch.object(private_store,"PrivateArtifactStore",return_value=store), \
              patch.object(nit,"ingest",side_effect=ingest), \
              patch.object(nit,"verified_count",side_effect=verify), \
