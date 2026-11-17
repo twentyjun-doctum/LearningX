@@ -88,7 +88,16 @@ async def _dispatch_job(job_id:str,attempt:int):
     Never send file contents to GitHub; the DB remains source of truth.
     Scheduled recovery polls queued jobs if the trigger is lost.
     """
-    if os.getenv("NIT_WORKER_BACKEND","") != "github_actions":
+    mode=os.getenv("NIT_WORKER_BACKEND","")
+    if mode in ("vercel_queue","vercel_queues") or (not mode and os.getenv("NIT_QUEUE_ENABLED")=="1"):
+        try:
+            from vercel.queue import send
+            await send("learningx-ingest", {"job_id":job_id},
+                       idempotency_key=f"learningx-{job_id}-attempt-{attempt}")
+            return
+        except Exception as exc:
+            raise HTTPException(503,"Ingestion event could not be published; retry completion") from exc
+    if mode!="github_actions":
         raise HTTPException(503,"Dedicated ingestion worker is not configured")
     import urllib.request
     import re
