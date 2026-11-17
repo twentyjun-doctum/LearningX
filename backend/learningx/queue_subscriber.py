@@ -13,7 +13,7 @@ JOB_ID = re.compile(r"^[0-9a-f]{32}$")
 
 
 @subscribe(topic="learningx-ingest", retry_after=60, max_concurrency=2)
-async def process_lesson_job(message: dict) -> None:
+async def process_lesson_job(message: dict[str, str]) -> None:
     job_id = message.get("job_id") if isinstance(message, dict) else None
     if not isinstance(job_id, str) or not JOB_ID.fullmatch(job_id):
         raise ValueError("Invalid ingestion queue message")
