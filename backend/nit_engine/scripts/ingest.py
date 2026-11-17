@@ -195,7 +195,7 @@ def plan_vision(pages,limit=None):
         state='unknown_due_to_runtime' if unknown else ('queued' if score>=3 else 'not_required')
         p['routing']={'vision_priority':score,'reasons':reasons,'vision_state':state,
                       'visual_evidence_required':bool(score>=3) or unknown is not None and bool(unknown),
-                      'vision_verified':False}
+                      'vision_verified':False,'visual_analysis_executed':False,'vision_execution_status':'NOT_RUN'}
         if score>=3 and not unknown:
             jobs.append({'page':p['page'],'priority':score,'reasons':reasons,
                          'task':'verify_visual_content','status':'pending_unverified'})
@@ -318,6 +318,12 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
         document['analysis_caveats']=['PPTX narration/audio was not transcribed or considered as coaching evidence']
     else:
         document['media_coverage']={'audio_status':'NOT_APPLICABLE_PDF'}
+    # Vision jobs are PLANS, never evidence of image understanding or execution.
+    document['vision_execution']={'status':'NOT_RUN','planned_jobs':len(jobs),
+        'completed_jobs':0,'visual_semantics_verified':False,
+        'reason':'Native extraction does not render or interpret full slide visuals'}
+    document['analysis_caveats']=document.get('analysis_caveats',[])+[
+        'Vision job planning does not mean slide rendering or model inspection was performed']
     document['parser_arbitration']=arbitration_summary
     from canonical_ir import save as save_canonical_ir
     save_canonical_ir(out,document)
@@ -344,6 +350,8 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
               'semantic_jobs':len(sections(pages,section_size,source.name)),
               'native_seconds':round(time.perf_counter()-t,3),
               'state':('LIMITED_TEXT_INDEX_VISUAL_UNKNOWN' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else 'FAST_INDEX_READY_DEEP_PENDING'),'visual_inspection_status':('unknown' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else 'inspected_routing_only'), 'not_done':['AI understanding','OCR/vision for flagged pages','embedding indexing','human QA']}
+    manifest['vision_execution']=document['vision_execution']
+    manifest['native_parser_executed']=True
     manifest['media_coverage']=document.get('media_coverage',{})
     if source.suffix.lower()=='.pptx':
         manifest['not_done'].append('PPTX narration/audio transcription')
