@@ -27,6 +27,7 @@ MAX_UPLOAD_BYTES=100 * 1024 * 1024  # 32.9 MB PPTX supported; can lift only afte
 UPLOAD_TTL_SECONDS=900
 JOB_LEASE_SECONDS=600  # Longer than Vercel Hobby's 300s cap; avoid concurrent double-claim
 MAX_ATTEMPTS=3
+QUEUE_TOPIC="learningx-ingest"
 MIME={".pdf":"application/pdf",
       ".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
 
@@ -82,11 +83,30 @@ def initiate_upload(course_id:str,body:UploadRequest,
             "next":"POST /v1/courses/{course_id}/uploads/{upload_id}/complete"}
 
 
+async def _dispatch_job(job_id:str,attempt:int):
+    """Publish only the job ID. Idempotent over client retry/race windows."""
+    if os.getenv("NIT_QUEUE_ENABLED")!="1":
+        # Non-Vercel workers may call /internal/ingest/process manually.
+        if private_store.serverless():
+            raise HTTPException(503,"Vercel ingestion queue is not enabled")
+        return
+    try:
+        from vercel.queue import send
+        await send(QUEUE_TOPIC,{"job_id":job_id},
+                   idempotency_key=f"learningx-{job_id}-attempt-{attempt}")
+    except Exception as exc:
+        raise HTTPException(503,"Ingestion event could not be published; retry completion") from exc
+
+
 @router.post("/courses/{course_id}/uploads/{upload_id}/complete",status_code=202)
-def complete_upload(course_id:str,upload_id:str,db:Session=Depends(session),user=Depends(actor)):
+async def complete_upload(course_id:str,upload_id:str,db:Session=Depends(session),user=Depends(actor)):
     require_course(db,course_id,user,"faculty")
     job=_job_or_404(db,upload_id,course_id)
-    if job.status in ("QUEUED","RUNNING","READY"):
+    if job.status=="QUEUED":
+        # Retrying the same request re-publishes any event lost before ack.
+        await _dispatch_job(job.id,job.attempts)
+        return _public_job(job)
+    if job.status in ("RUNNING","READY"):
         return _public_job(job)
     if job.status!="AWAITING_UPLOAD":
         raise HTTPException(409,"Upload is not awaiting completion")
@@ -106,6 +126,7 @@ def complete_upload(course_id:str,upload_id:str,db:Session=Depends(session),user
     # HEAD content type can differ between S3 providers; verify on actual parsing.
     job.status="QUEUED"
     db.commit()
+    await _dispatch_job(job.id,job.attempts)
     return _public_job(job)
 
 
@@ -116,7 +137,7 @@ def upload_status(course_id:str,upload_id:str,db:Session=Depends(session),user=D
 
 
 @router.post("/courses/{course_id}/uploads/{upload_id}/retry",status_code=202)
-def retry_upload(course_id:str,upload_id:str,db:Session=Depends(session),user=Depends(actor)):
+async def retry_upload(course_id:str,upload_id:str,db:Session=Depends(session),user=Depends(actor)):
     require_course(db,course_id,user,"faculty")
     row=_job_or_404(db,upload_id,course_id)
     if row.status!="FAILED" or row.attempts>=MAX_ATTEMPTS:
@@ -124,12 +145,16 @@ def retry_upload(course_id:str,upload_id:str,db:Session=Depends(session),user=De
     row.status="QUEUED"
     row.error_code=None
     db.commit()
+    await _dispatch_job(row.id,row.attempts)
     return _public_job(row)
 
 
-def _claim(db):
+def _claim(db,job_id=None):
     now=datetime.now(timezone.utc)
-    row=(db.query(IngestJob)
+    query=db.query(IngestJob)
+    if job_id is not None:
+        query=query.filter(IngestJob.id==job_id)
+    row=(query
          .filter(or_(IngestJob.status=="QUEUED",
                     (IngestJob.status=="RUNNING")&(IngestJob.lease_until<now)))
          .filter(IngestJob.attempts<MAX_ATTEMPTS)
@@ -168,13 +193,23 @@ def _download_verified(store,job,path):
     return hasher.hexdigest()
 
 
-def process_next_job():
-    """Perform work in a separate invocation; safe to redeliver after a lease."""
+def process_next_job(job_id=None):
+    """Perform one leased job by ID; repeated queue messages are idempotent."""
     with SessionLocal() as db:
-        job_id=_claim(db)
-    if not job_id:return {"result":"EMPTY"}
+        claimed=_claim(db,job_id)
+        if not claimed:
+            row=db.get(IngestJob,job_id) if job_id else None
+            if row and row.status=="READY":return {"result":"ALREADY_READY","job_id":job_id}
+            if row and row.status=="FAILED":return {"result":"ALREADY_FAILED","job_id":job_id}
+            if row and row.status=="RUNNING":
+                if row.attempts>=MAX_ATTEMPTS:
+                    row.status="FAILED";row.error_code="WORKER_TIMEOUT"
+                    row.lease_until=None;db.commit()
+                    return {"result":"ALREADY_FAILED","job_id":job_id}
+                return {"result":"INFLIGHT","job_id":job_id}
+            return {"result":"EMPTY" if not row else "ERROR","job_id":job_id}
     with SessionLocal() as db:
-        row=db.get(IngestJob,job_id)
+        row=db.get(IngestJob,claimed)
         if not row:return {"result":"MISSING"}
         try:
             store=private_store.require_store()
@@ -206,7 +241,7 @@ def process_next_job():
                 row.error_code=None
                 row.lease_until=None
                 db.commit()
-                return {"result":"READY","job_id":job_id}
+                return {"result":"READY","job_id":claimed}
         except Exception as exc:
             db.rollback()
             row=db.get(IngestJob,job_id)
@@ -217,7 +252,7 @@ def process_next_job():
                                 and exc.status_code==503 else "INGEST_FAILED")
                 row.lease_until=None
                 db.commit()
-            return {"result":"FAILED","job_id":job_id}
+            return {"result":"FAILED","job_id":claimed}
 
 
 @router.post("/internal/ingest/process")
