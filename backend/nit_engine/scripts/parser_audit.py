@@ -8,6 +8,22 @@ def audit(out):
     out=Path(out)
     doc=json.loads((out/'document.json').read_text(encoding='utf-8'))
     manifest=json.loads((out/'manifest.json').read_text(encoding='utf-8'))
+    if manifest.get('sha256')!=doc['source']['sha256']:
+        raise ValueError('Source hash mismatch')
+    # PDF arbitration does not run for PPTX; never fake a comparison.
+    if doc.get('source',{}).get('type') == 'pptx':
+        if manifest.get('parser_arbitration',{}).get('comparison_mode')!='not_applicable_pptx':
+            raise ValueError('Inconsistent PPTX parser mode')
+        report={'schema_version':'nit_parser_audit_v1_6','source_sha256':doc['source']['sha256'],
+                'source_pages':len(doc['pages']),'comparison_mode':'not_applicable_pptx',
+                'pages_compared':0,'selected':{'python-pptx':len(doc['pages'])},
+                'review_required_count':0,'review_required_pages':[],
+                'disagreement_count':0,'disagreement_pages':[],
+                'visual_and_ocr_accuracy_measured':False,
+                'not_applicable_reason':'PDF parser arbitration is not defined for PPTX',
+                'note':'PPTX native extraction only; media/transcription not verified.'}
+        (out/'parser_audit_report.json').write_text(json.dumps(report,indent=2,ensure_ascii=False),encoding='utf-8')
+        return report
     rows=[json.loads(x) for x in (out/'parser_arbitration.jsonl').read_text(encoding='utf-8').splitlines() if x.strip()]
     n=len(doc['pages'])
     if len(rows)!=n:raise ValueError(f'Incomplete parser audit: {len(rows)}/{n} pages')
