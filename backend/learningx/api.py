@@ -238,8 +238,13 @@ def course_materials(course_id:str,db:Session=Depends(session),user:User=Depends
     # No raw document content, files, or teacher review evidence is returned.
     items=[]
     for m in materials:
-        with private_store.material_workspace(m) as out:
-            signed=nit.verified_count(out)
-        items.append({"id":m.id,"filename":m.filename,
-            "status":"FACULTY_SIGNED" if signed else "PENDING_FACULTY_REVIEW"})
+        try:
+            with private_store.material_workspace(m) as out:
+                signed=nit.verified_count(out)
+            status="FACULTY_SIGNED" if signed else "PENDING_FACULTY_REVIEW"
+        except HTTPException as exc:
+            if exc.status_code != 503:raise
+            # A legacy local-path record must never block newer durable materials.
+            status="UNAVAILABLE"
+        items.append({"id":m.id,"filename":m.filename,"status":status})
     return {"items":items}
