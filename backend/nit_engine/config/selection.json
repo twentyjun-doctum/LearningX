@@ -1,0 +1,23 @@
+{
+  "version":"1.1",
+  "weights":{"educational_alignment":30,"latency_scalability":20,"implementability":15,"reliability":15,"security":10,"testability":10},
+  "minimum_score":75,
+  "hard_gates":["No source-free factual claims", "No student access to teacher-only notes", "No AI activity when the course policy prohibits AI", "No invented performance guarantee"],
+  "ideas":[
+    {"id":"native_router","name":"PDF/PPTX native-first 라우터","scores":[5,5,5,4,5,5],"gate":"pass","decision":"ADOPT","rationale":"200쪽 교안의 비용과 지연 감소에 직접 기여"},
+    {"id":"selective_vision","name":"복잡 페이지 선별적 시각 분석","scores":[5,5,4,4,4,5],"gate":"pass","decision":"ADOPT","rationale":"필요할 때만 이미지 모델 호출"},
+    {"id":"provenance","name":"페이지·객체 출처 추적","scores":[5,4,5,5,5,5],"gate":"pass","decision":"ADOPT","rationale":"교안 기반 질문 코칭과 검증에 필수"},
+    {"id":"fast_deep","name":"FAST/DEEP 처리 상태 및 점진적 공개","scores":[5,5,4,4,5,5],"gate":"pass","decision":"ADOPT","rationale":"시각 해석을 기다리지 않고 사용 가능한 정보만 먼저 공개"},
+    {"id":"graceful_degradation","name":"읽기 실패 구간만 격리","scores":[5,5,4,5,5,5],"gate":"pass","decision":"ADOPT","rationale":"전체 교안 처리 중단 방지, 미검증 구간 차단"},
+    {"id":"source_hint_map","name":"교안 근거 기반 질문 힌트 맵","scores":[5,4,4,4,5,5],"gate":"pass","decision":"ADOPT","rationale":"정답 대신 학생 질문을 발전시키는 핵심 목적"},
+    {"id":"policy","name":"과목별 교수자 AI 정책 게이트","scores":[5,4,4,5,5,5],"gate":"pass","decision":"ADOPT","rationale":"교수자 재량 및 수업정책 보호"},
+    {"id":"notes_isolation","name":"PPTX 발표자 노트 격리","scores":[5,4,5,5,5,5],"gate":"pass","decision":"ADOPT","rationale":"수업자료와 교수자 전용 내용 분리"},
+    {"id":"section_chunk","name":"페이지 출처를 보존한 섹션 중심 검색","scores":[5,4,4,4,4,5],"gate":"pass","decision":"ADOPT","rationale":"관련 페이지 검색 누락 감소; 임베딩 서비스는 별도"},
+    {"id":"quiz_seed","name":"돌발 퀴즈 자동 생성","scores":[2,3,4,3,4,4],"gate":"pass","decision":"DEFER","rationale":"질문 생성·개선 MVP보다 우선순위 낮음"},
+    {"id":"full_graph","name":"독립형 지식 그래프 DB","scores":[3,2,2,3,4,3],"gate":"pass","decision":"DEFER","rationale":"초기에는 개념 JSON과 관계 맵으로 충분"},
+    {"id":"hidden_marker","name":"교안 내 숨은 명령으로 AI 대리작성 탐지","scores":[1,3,3,1,1,2],"gate":"fail","decision":"REJECT","rationale":"탐지 신뢰도 부족, 프롬프트 주입 위험"},
+    {"id":"3second_guarantee","name":"200쪽 교안 3초 내 AI 완전 이해 보장","scores":[3,1,1,1,3,1],"gate":"fail","decision":"REJECT","rationale":"미측정 보장치, 네트워크·교안 형태에 따라 변동"},
+    {"id":"80percent_savings","name":"80% 비용 절감 성능 보장","scores":[2,1,1,1,4,1],"gate":"fail","decision":"REJECT","rationale":"비교 실험 없는 정량 주장"},
+    {"id":"perfect_parsing","name":"PPTX 텍스트·노트 추출 100% 정확도","scores":[2,1,1,1,4,1],"gate":"fail","decision":"REJECT","rationale":"스마트아트, 수식, 텍스트 순서 등 예외"}
+  ]
+}
