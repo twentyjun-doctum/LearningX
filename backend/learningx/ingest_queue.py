@@ -7,6 +7,7 @@ external (durable queue/worker runner) and must be configured separately.
 import hashlib
 import hmac
 import json
+import logging
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -22,6 +23,7 @@ from .storage import Course, IngestJob, Material, SessionLocal
 from .security import actor, require_course, session
 from . import engine_adapter as nit, private_store
 
+logger = logging.getLogger(__name__)
 router=APIRouter(prefix="/v1")
 MAX_UPLOAD_BYTES=100 * 1024 * 1024  # 32.9 MB PPTX supported; can lift only after budget tests.
 UPLOAD_TTL_SECONDS=900
@@ -242,18 +244,23 @@ def process_next_job(job_id=None):
     with SessionLocal() as db:
         row=db.get(IngestJob,claimed)
         if not row:return {"result":"MISSING"}
+        stage = "storage_init"
         try:
             store=private_store.require_store()
             with tempfile.TemporaryDirectory(prefix="learningx-worker-") as td:
                 root=Path(td)
                 ext=Path(row.filename).suffix.lower()
                 original=root/("source"+ext)
+                stage = "download"
                 digest=_download_verified(store,row,original)
                 parsed=root/"parsed"
+                stage = "parse"
                 document=nit.ingest(original,parsed)
                 if document["source"]["sha256"]!=digest:
                     raise ValueError("Parser source digest mismatch")
+                stage = "publish"
                 location=store.publish_new(root,row.course_id,row.id)
+                stage = "database_commit"
                 coverage=document.get("media_coverage",{})
                 if ext==".pptx":
                     coverage.setdefault("audio_status","UNKNOWN_NOT_VERIFIED")
@@ -274,6 +281,7 @@ def process_next_job(job_id=None):
                 db.commit()
                 return {"result":"READY","job_id":claimed}
         except Exception as exc:
+            logger.warning("learningx_ingest_failed stage=%s exception=%s", stage, type(exc).__name__)
             db.rollback()
             row=db.get(IngestJob,claimed)
             if row:
