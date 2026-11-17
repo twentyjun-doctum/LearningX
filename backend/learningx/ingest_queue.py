@@ -25,9 +25,8 @@ from . import engine_adapter as nit, private_store
 router=APIRouter(prefix="/v1")
 MAX_UPLOAD_BYTES=100 * 1024 * 1024  # 32.9 MB PPTX supported; can lift only after budget tests.
 UPLOAD_TTL_SECONDS=900
-JOB_LEASE_SECONDS=600  # Longer than Vercel Hobby's 300s cap; avoid concurrent double-claim
+JOB_LEASE_SECONDS=3600  # Dedicated GitHub Actions process, with stale-lease recovery
 MAX_ATTEMPTS=3
-QUEUE_TOPIC="learningx-ingest"
 MIME={".pdf":"application/pdf",
       ".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
 
@@ -84,19 +83,34 @@ def initiate_upload(course_id:str,body:UploadRequest,
 
 
 async def _dispatch_job(job_id:str,attempt:int):
-    """Publish only the job ID. Idempotent over client retry/race windows."""
-    if os.getenv("NIT_QUEUE_ENABLED")!="1":
-        # Non-Vercel workers may call /internal/ingest/process manually.
-        if private_store.serverless():
-            raise HTTPException(503,"Vercel ingestion queue is not enabled")
-        return
-    try:
-        from vercel.queue import send
-        await send(QUEUE_TOPIC,{"job_id":job_id},
-                   idempotency_key=f"learningx-{job_id}-attempt-{attempt}")
-    except Exception as exc:
-        raise HTTPException(503,"Ingestion event could not be published; retry completion") from exc
+    """Dispatch one Neon DB job to a standalone GitHub Actions worker.
 
+    Never send file contents to GitHub; the DB remains source of truth.
+    Scheduled recovery polls queued jobs if the trigger is lost.
+    """
+    if os.getenv("NIT_WORKER_BACKEND","") != "github_actions":
+        raise HTTPException(503,"Dedicated ingestion worker is not configured")
+    import urllib.request
+    import re
+    repo=os.getenv("NIT_WORKER_REPOSITORY","zxmk9123-creator/LearningX")
+    token=os.getenv("NIT_WORKER_GITHUB_TOKEN","")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+",repo) or len(token)<20:
+        raise HTTPException(503,"GitHub Actions worker dispatch credentials missing")
+    request=urllib.request.Request(
+        f"https://api.github.com/repos/{repo}/dispatches",
+        data=json.dumps({"event_type":"learningx-ingest",
+                         "client_payload":{"job_id":job_id}}).encode(),
+        headers={"Authorization":"Bearer "+token,
+                 "Accept":"application/vnd.github+json",
+                 "X-GitHub-Api-Version":"2022-11-28",
+                 "Content-Type":"application/json"},
+        method="POST")
+    try:
+        with urllib.request.urlopen(request,timeout=8) as response:
+            if response.status!=204:
+                raise RuntimeError("Dispatch did not return HTTP 204")
+    except Exception as exc:
+        raise HTTPException(503,"Ingestion dispatch delayed; retry later") from exc
 
 @router.post("/courses/{course_id}/uploads/{upload_id}/complete",status_code=202)
 async def complete_upload(course_id:str,upload_id:str,db:Session=Depends(session),user=Depends(actor)):
@@ -248,7 +262,7 @@ def process_next_job(job_id=None):
                 return {"result":"READY","job_id":claimed}
         except Exception as exc:
             db.rollback()
-            row=db.get(IngestJob,job_id)
+            row=db.get(IngestJob,claimed)
             if row:
                 # No raw slide text, stack trace, secrets or filenames in status.
                 row.status="FAILED"
