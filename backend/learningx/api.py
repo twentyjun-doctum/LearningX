@@ -16,6 +16,7 @@ from .storage import init_db, User, Course, Member, Material, Audit, Question, R
 from .security import actor, session, require_course, secret
 from . import engine_adapter as nit
 from . import private_store
+from .ingest_queue import router as ingest_router
 
 app=FastAPI(title="LearningX NIT Backend",version="0.1.0",docs_url=None,redoc_url=None)
 # Frontend origins must be explicitly configured; no wildcard CORS with bearer tokens.
@@ -120,8 +121,9 @@ async def upload_material(course_id:str,file:UploadFile=File(...),db:Session=Dep
     if not db.get(Course,course_id):raise HTTPException(404,"Course not found")
     # A Vercel function cannot persist teacher evidence in /tmp.
     durable=private_store.durable_upload_enabled()
-    if private_store.serverless() and not durable:
-        raise HTTPException(503,"Private durable lesson storage is required for Vercel")
+    if private_store.serverless():
+        # On Vercel, even a 32.9MB request never reaches FastAPI: 4.5MB limit.
+        raise HTTPException(410,"Use /v1/courses/{id}/uploads/initiate for direct upload")
     filename=Path(file.filename or "").name
     ext=Path(filename).suffix.lower()
     if ext not in (".pdf",".pptx"):raise HTTPException(415,"PDF or PPTX only")
@@ -248,3 +250,7 @@ def course_materials(course_id:str,db:Session=Depends(session),user:User=Depends
             status="UNAVAILABLE"
         items.append({"id":m.id,"filename":m.filename,"status":status})
     return {"items":items}
+
+
+# Durable direct-upload and asynchronous job lifecycle.
+app.include_router(ingest_router)
