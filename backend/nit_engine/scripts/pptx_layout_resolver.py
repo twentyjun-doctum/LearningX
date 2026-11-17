@@ -38,6 +38,21 @@ def paragraphs(shape):
         result.append({'text':par.text,'level':par.level,'runs':runs})
     return result
 
+def is_media_control(shape):
+    """PowerPoint play/audio/video controls are UI, not learning visual evidence.
+
+    Detect media relationship/action in the shape tree; a visually similar
+    decorative icon remains unverified until the real slide is inspected.
+    """
+    try:
+        xml=shape.element.xml.lower()
+        return ('ppaction://media' in xml or
+                'audiofile' in xml or 'videofile' in xml or
+                'mediarid' in xml or 'mediatrim' in xml)
+    except (AttributeError, ValueError):
+        return False
+
+
 def extract_visible(slide,slide_index,width,height):
     blocks=[]; stats=Counter();rects=[]
     def emit(shapes,layer,include_placeholders=False):
@@ -85,8 +100,12 @@ def extract_visible(slide,slide_index,width,height):
                 blocks.append({**base,'type':'text','text':compact(sh.text),'raw_text':sh.text,
                                'paragraphs':paragraphs(sh)})
             if sh.shape_type==13 or 'PICTURE' in str(sh.shape_type):
-                stats['images']+=1
-                if box:rects.append(box)
+                if is_media_control(sh):
+                    stats['media_control_images']+=1
+                    # It is not evidence of an educational image/diagram.
+                else:
+                    stats['images']+=1
+                    if box:rects.append(box)
             if 'FREEFORM' in str(sh.shape_type) or 'AUTO_SHAPE' in str(sh.shape_type):stats['shapes']+=1
     # For this task, inherited layout text is visible without being slide-owned.
     emit(slide.shapes,'slide')
