@@ -23,7 +23,7 @@ Blueprint 설정:
 
 | 이름 | 값/입력 방법 |
 | --- | --- |
-| `DATABASE_URL` | Neon `learningx-pilot` → **Connect** → `learningx` → Pooled connection에서 복사. 백엔드에서 `postgresql://`을 자동 변환함 |
+| `DATABASE_URL` | Neon `learningx-pilot` → **Connect** → `learningx` → **Direct connection**에서 복사. 현재 백엔드는 시작 시 테이블을 생성하므로 파일럿 초기 연결에 Direct URL을 사용. `postgresql://`은 서버에서 `postgresql+psycopg://`으로 자동 변환됨 |
 | `NIT_JWT_SECRET` | Render가 생성한 고유 랜덤 값. 로컬 관리자 CLI에서 JWT 생성 시 같은 값 필요 |
 | `NIT_REVIEW_SIGNING_KEY` | Render가 생성한 또 다른 랜덤 값. 승인 서명용이므로 JWT 키와 재사용하지 않음 |
 | `NIT_CORS_ORIGINS` | `https://learning-x-one.vercel.app` (Blueprint 기본값) |
