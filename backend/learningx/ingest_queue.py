@@ -57,14 +57,13 @@ def initiate_upload(course_id:str,body:UploadRequest,
     suffix=Path(body.filename).suffix.lower()
     if suffix not in MIME:raise HTTPException(415,"PDF/PPTX only")
     store=private_store.require_store()
-    job=IngestJob(course_id=course_id,uploaded_by=user.id,
+    job=IngestJob(id=os.urandom(16).hex(),course_id=course_id,uploaded_by=user.id,
                   filename=Path(body.filename).name[:260],
                   media_type=MIME[suffix],expected_size=body.size_bytes,
                   source_key="pending")
-    db.add(job)
-    db.flush()
-    # Server-generated unique upload key, never taken from an untrusted user path.
+    # Generate the unique source key before the INSERT/flush.
     job.source_key=f"incoming/{course_id}/{job.id}/source{suffix}"
+    db.add(job)
     try:
         url=store.client.generate_presigned_url(
             ClientMethod="put_object",
