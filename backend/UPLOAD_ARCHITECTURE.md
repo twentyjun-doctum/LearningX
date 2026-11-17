@@ -6,8 +6,8 @@ Vercel API는 4.5MB 요청 본문 제한이 있으므로 32.9MB PPTX와 대형 P
 
 1. 교수자가 POST /v1/courses/{course_id}/uploads/initiate 에 파일명·크기만 전송하고 Neon Private Object Storage의 15분 유효 presigned PUT URL을 받습니다.
 2. 브라우저가 원본 파일을 Neon S3에 직접 PUT 합니다. 교수자 JWT는 S3로 전송하지 않습니다.
-3. POST /v1/courses/{course_id}/uploads/{upload_id}/complete 는 S3 HEAD로 바이트 수를 확인하고 DB에 QUEUED 상태만 저장합니다. 문서 파싱은 이 요청에서 실행되지 않습니다.
-4. 별도 작업 실행기가 POST /v1/internal/ingest/process 를 서버 전용 NIT_WORKER_SECRET으로 호출합니다. 리스된 작업 하나를 실행하고 원본 해시를 확인하여 NIT 분석 산출물을 private S3에 영구 저장합니다.
+3. POST /v1/courses/{course_id}/uploads/{upload_id}/complete 는 S3 HEAD로 바이트 수를 확인하고 DB에 QUEUED 상태를 저장한 뒤 Vercel Queues Python SDK로 별도 함수에 **작업 ID만 발행**합니다. 문서 파싱은 이 요청에서 실행되지 않습니다.
+4. Vercel의 비공개 Python Queue 구독자 (backend/learningx/queue_subscriber.py)가 메시지를 수신해 데이터베이스에서 해당 작업 ID를 리스하고 원본 해시를 확인하여 NIT 분석 산출물을 private S3에 영구 저장합니다.
 5. 교수자는 GET /v1/courses/{course_id}/uploads/{upload_id} 로 AWAITING_UPLOAD / QUEUED / RUNNING / READY / FAILED 상태와 분석 누락 범위를 조회합니다. READY 이후에만 교수자 승인 후보를 검토할 수 있습니다.
 
 현재 최대 파일 크기는 100MB입니다. 367페이지 PDF 등 고비용 자료의 실행 시간과 메모리 사용량을 실측하기 전에는 상한을 상향하지 않습니다.
@@ -37,7 +37,7 @@ PPTX에 음성이 탐지되지 않아도 별도 외부 강의 녹음의 존재 �
 
 ## 미완료 배포 조건
 
-- 자동 작업 디스패처(예: Vercel Queues 또는 별도 안정적 실행기)는 아직 연결되지 않았습니다. DB QUEUED 상태는 워커가 호출되지 않으면 계속 유지됩니다.
+- 자동 작업 디스패처(예: Vercel Queues 또는 별도 안정적 실행기)는 아직 연결되지 않았습니다. DB QUEUED 상태는 실제 Vercel Queues 연동이 활성화되지 않으면 계속 유지됩니다.
 - 업로드용 Neon S3의 실제 브라우저 CORS preflight/PUT 성공을 검증해야 합니다.
 - Vercel API 프로젝트는 이전 연결 권한 403으로 아직 실제 생성되지 않았습니다.
 - 작업 실패 및 timeout 재시도, 대형 입력 메모리, 부적절한 ZIP/PPTX, 동시 작업을 운영 환경에서 시험해야 합니다.
@@ -50,3 +50,13 @@ GitHub 테스트는 Fake S3, Mock NIT parser, 합성 PPTX를 사용한 접근제
 실제 Neon Object Storage 네트워크 PUT과 FreeLLMAPI End-to-End 증명이 아닙니다.
 
 공식 참고: https://vercel.com/docs/functions/limitations · https://vercel.com/docs/queues · https://neon.com/docs/storage/get-started
+
+## Vercel Queues Python SDK 구성
+
+- `backend/pyproject.toml`의 `[[tool.vercel.subscribers]]`가 `learningx.queue_subscriber`를 등록합니다.
+- 업로드 완료 시 `vercel.queue.send("learningx-ingest", {"job_id":...}, idempotency_key=...)` 형태로 메시지를 발행합니다. 파일 내용은 큐에 보내지 않습니다.
+- 구독자는 Vercel 관리 **비공개 함수**로 동작하며 DB에서 작업 ID를 재확인합니다. 재전달되더라도 READY/FAILED 등 최종 상태를 구분합니다.
+- API 프로젝트에 `NIT_QUEUE_ENABLED=1` 설정 필수. 신규 프로젝트 배포 전 SDK의 실제 OIDC/Queue 자동 등록 및 파일럿 처리 지연을 검증해야 합니다.
+- Neon 비공개 S3의 브라우저 PUT에는 버킷 CORS가 필요합니다. `backend/scripts/configure_neon_cors.py`를 자격증명을 가진 운영자 환경에서 실행하고 AllowedOrigins를 배포된 프론트엔드 정확한 Origin으로 한정해야 합니다.
+
+참고: https://vercel.com/docs/queues · https://pypi.org/project/vercel-queue/
