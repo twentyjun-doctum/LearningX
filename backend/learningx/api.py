@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 import shutil
+import tempfile
+from contextlib import ExitStack
 from typing import Literal
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -13,6 +15,7 @@ from sqlalchemy import text as sql_text
 from .storage import init_db, User, Course, Member, Material, Audit, Question, Revision
 from .security import actor, session, require_course, secret
 from . import engine_adapter as nit
+from . import private_store
 
 app=FastAPI(title="LearningX NIT Backend",version="0.1.0",docs_url=None,redoc_url=None)
 # Frontend origins must be explicitly configured; no wildcard CORS with bearer tokens.
@@ -115,58 +118,65 @@ def update_policy(course_id:str,data:CoursePolicy,db:Session=Depends(session),us
 async def upload_material(course_id:str,file:UploadFile=File(...),db:Session=Depends(session),user:User=Depends(actor)):
     require_course(db,course_id,user,"faculty")
     if not db.get(Course,course_id):raise HTTPException(404,"Course not found")
-    # Vercel /tmp is scratch space, not a durable faculty evidence store.
-    # Keep the entire upload -> approval -> coaching chain fail-closed until
-    # private object storage is installed with verified signed artifacts.
-    if os.getenv("NIT_SERVERLESS_RUNTIME") == "1" or os.getenv("VERCEL") == "1":
+    # A Vercel function cannot persist teacher evidence in /tmp.
+    durable=private_store.durable_upload_enabled()
+    if private_store.serverless() and not durable:
         raise HTTPException(503,"Private durable lesson storage is required for Vercel")
     filename=Path(file.filename or "").name
     ext=Path(filename).suffix.lower()
     if ext not in (".pdf",".pptx"):raise HTTPException(415,"PDF or PPTX only")
     data=await file.read(25*1024*1024+1)
     if len(data)>25*1024*1024:raise HTTPException(413,"File too large")
-    if not data.startswith(b"%PDF-") and not (ext==".pptx" and data.startswith(b"PK")):
+    if not ((ext==".pdf" and data.startswith(b"%PDF-")) or
+            (ext==".pptx" and data.startswith(b"PK"))):
         raise HTTPException(422,"Invalid file signature")
-    # Render Free's temporary filesystem must not be used for faculty evidence.
-    # An attached Render Disk should be mounted at a non-temporary path.
-    if os.getenv("RENDER_SERVICE_ID") and os.getenv("NIT_STORAGE_DIR","").startswith(("/tmp/","/var/tmp/")):
+    if os.getenv("RENDER_SERVICE_ID") and not durable:
         raise HTTPException(503,"Durable document storage is required before uploads")
-    # Private filesystem only. No public static route for raw teacher materials.
-    storage=Path(os.getenv("NIT_STORAGE_DIR","./private_lessons")).resolve()
     mid=os.urandom(16).hex()
-    directory=storage/mid
-    directory.mkdir(parents=True,exist_ok=False)
-    try:
-        original=directory/("source"+ext)
-        original.write_bytes(data)
-        sha=hashlib.sha256(data).hexdigest()
-        out=directory/"parsed"
-        document=nit.ingest(original,out)
-        if document["source"]["sha256"]!=sha:
-            raise HTTPException(422,"Parser source digest mismatch")
-        record=Material(id=mid,course_id=course_id,filename=filename[:260],sha256=sha,
-            out_dir=str(out),ingested_by=user.id)
-        db.add(record)
-        audit(db,user.id,course_id,"material_ingested",mid)
-        db.commit()
-        return {"id":mid,"filename":filename,"pages":len(document["pages"]),
-            "status":"PENDING_FACULTY_REVIEW","approved_count":0}
-    except Exception:
-        db.rollback();shutil.rmtree(directory,ignore_errors=True)
-        raise
+    with ExitStack() as scope:
+        if durable:
+            directory=Path(scope.enter_context(tempfile.TemporaryDirectory(prefix="learningx-ingest-")))
+        else:
+            directory=Path(os.getenv("NIT_STORAGE_DIR","./private_lessons")).resolve()/mid
+            directory.mkdir(parents=True,exist_ok=False)
+        try:
+            original=directory/("source"+ext)
+            original.write_bytes(data)
+            sha=hashlib.sha256(data).hexdigest()
+            out=directory/"parsed"
+            document=nit.ingest(original,out)
+            if document["source"]["sha256"]!=sha:
+                raise HTTPException(422,"Parser source digest mismatch")
+            location=(private_store.store_after_ingest(directory,course_id,mid)
+                      if durable else str(out))
+            record=Material(id=mid,course_id=course_id,filename=filename[:260],sha256=sha,
+                out_dir=location,ingested_by=user.id)
+            db.add(record)
+            audit(db,user.id,course_id,"material_ingested",mid)
+            db.commit()
+            return {"id":mid,"filename":filename,"pages":len(document["pages"]),
+                "status":"PENDING_FACULTY_REVIEW","approved_count":0}
+        except Exception:
+            db.rollback()
+            if not durable:shutil.rmtree(directory,ignore_errors=True)
+            raise
 
 @app.get("/v1/materials/{material_id}/candidates")
 def list_candidates(material_id:str,db:Session=Depends(session),user:User=Depends(actor)):
     m=material_for(db,material_id)
     require_course(db,m.course_id,user,"faculty")
-    return {"material_id":m.id,"eligible_candidates":nit.candidates(Path(m.out_dir)),
-        "approved_count":nit.verified_count(Path(m.out_dir))}
+    with private_store.material_workspace(m) as out:
+        return {"material_id":m.id,"eligible_candidates":nit.candidates(out),
+            "approved_count":nit.verified_count(out)}
 
 @app.post("/v1/materials/{material_id}/approve")
 def approve(material_id:str,data:Review,db:Session=Depends(session),user:User=Depends(actor)):
-    m=material_for(db,material_id)
+    m=db.query(Material).filter_by(id=material_id).with_for_update().first()
+    if not m:raise HTTPException(404,"Material not found")
     require_course(db,m.course_id,user,"faculty")
-    result=nit.approve_material(Path(m.out_dir),user.id,[x.model_dump() for x in data.items])
+    with private_store.material_workspace(m) as out:
+        result=nit.approve_material(out,user.id,[x.model_dump() for x in data.items])
+        private_store.persist_approval(m,out)
     audit(db,user.id,m.course_id,"evidence_signed",m.id,detail=f"count={result['approved']}")
     db.commit()
     return {"material_id":m.id,"approved_count":result["approved"],"status":"FACULTY_SIGNED"}
@@ -177,7 +187,8 @@ def ask(course_id:str,data:Ask,db:Session=Depends(session),user:User=Depends(act
     m=material_for(db,data.material_id,course_id)
     c=db.get(Course,course_id)
     if not c:raise HTTPException(404,"Course not found")
-    result=nit.coach_question(Path(m.out_dir),user.id,data.question,c.policy,c.teacher_approved)
+    with private_store.material_workspace(m) as out:
+        result=nit.coach_question(out,user.id,data.question,c.policy,c.teacher_approved)
     q=Question(course_id=course_id,material_id=m.id,student_id=user.id,
         text=data.question,feedback_json=json.dumps(result,ensure_ascii=False))
     db.add(q);db.flush()
@@ -225,5 +236,10 @@ def course_materials(course_id:str,db:Session=Depends(session),user:User=Depends
         raise HTTPException(404,"Course not found")
     materials=db.query(Material).filter_by(course_id=course_id).order_by(Material.created_at.desc()).all()
     # No raw document content, files, or teacher review evidence is returned.
-    return {"items":[{"id":m.id,"filename":m.filename,
-        "status":"FACULTY_SIGNED" if nit.verified_count(Path(m.out_dir)) else "PENDING_FACULTY_REVIEW"} for m in materials]}
+    items=[]
+    for m in materials:
+        with private_store.material_workspace(m) as out:
+            signed=nit.verified_count(out)
+        items.append({"id":m.id,"filename":m.filename,
+            "status":"FACULTY_SIGNED" if signed else "PENDING_FACULTY_REVIEW"})
+    return {"items":items}
