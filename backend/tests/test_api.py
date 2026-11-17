@@ -147,45 +147,46 @@ class BackendTests(unittest.TestCase):
         self.assertEqual(r.status_code,503,r.text)
         self.assertIn("Durable document storage",r.json()["detail"])
 
-    def test_10_vercel_requires_durable_course_storage(self):
+    def test_10_vercel_redirects_legacy_uploads_to_direct_storage(self):
         cid=self.course_id
         with patch.dict(os.environ,{"NIT_SERVERLESS_RUNTIME":"1"}):
-            with patch.object(nit,"ingest",side_effect=AssertionError("must not ingest")) as mock:
+            with patch.object(nit,"ingest",side_effect=AssertionError("never inline")) as mock:
                 r=self.req("POST",f"/v1/courses/{cid}/materials",self.tf,
-                    files={"file":("lesson.pdf",b"%PDF-1.7\\nTest", "application/pdf")})
-                self.assertEqual(r.status_code,503,r.text)
-                self.assertIn("durable",r.json()["detail"])
+                    files={"file":("lesson.pdf",b"%PDF-1.7\nTest", "application/pdf")})
+                self.assertEqual(r.status_code,410,r.text)
+                self.assertIn("/uploads/initiate",r.json()["detail"])
                 mock.assert_not_called()
 
     def test_11_vercel_still_checks_course_acl_before_upload_guard(self):
         cid=self.course_id
         with patch.dict(os.environ,{"NIT_SERVERLESS_RUNTIME":"1"}):
             r=self.req("POST",f"/v1/courses/{cid}/materials",self.to,
-                files={"file":("lesson.pdf",b"%PDF-1.7\\nTest","application/pdf")})
+                files={"file":("lesson.pdf",b"%PDF-1.7\nTest","application/pdf")})
             self.assertEqual(r.status_code,403,r.text)
 
-    def test_12_serverless_s3_upload_approve_and_coach_roundtrip(self):
+    def test_12_direct_upload_enqueue_worker_then_approve_and_coach(self):
         from learningx import private_store
         from learningx.private_store import PrivateArtifactStore
         from test_store import FakeS3
-        test_env={
-            "NIT_SERVERLESS_RUNTIME":"1",
+        env={"NIT_SERVERLESS_RUNTIME":"1",
             "AWS_ACCESS_KEY_ID":"local-test-key",
             "AWS_SECRET_ACCESS_KEY":"local-test-secret",
             "AWS_ENDPOINT_URL_S3":"https://test.neon.invalid",
             "AWS_REGION":"ap-southeast-1",
             "NIT_STORAGE_BUCKET":"learningx-private-lessons",
-        }
+            "NIT_WORKER_SECRET":"workers-can-run-only-with-this-secret-123"}
         fake=FakeS3()
         store=PrivateArtifactStore.__new__(PrivateArtifactStore)
         store.bucket="learningx-private-lessons"
         store.client=fake
+        payload=b"%PDF-1.7\nConfidential"
         def ingest(source,out):
             out.mkdir(parents=True)
-            document={"source":{"sha256":hashlib.sha256(source.read_bytes()).hexdigest()},
-                      "pages":[{"page":1,"blocks":[]}]}
-            (out/"document.json").write_text(json.dumps(document),encoding="utf8")
-            return document
+            doc={"source":{"sha256":hashlib.sha256(source.read_bytes()).hexdigest()},
+                 "pages":[{"page":1,"blocks":[]}],
+                 "media_coverage":{"audio_status":"NOT_APPLICABLE_PDF"}}
+            (out/"document.json").write_text(json.dumps(doc),encoding="utf8")
+            return doc
         def sign(out,reviewer,selected):
             (out/"approved_evidence.json").write_text('{"signature":"faculty"}',encoding="utf8")
             return {"approved":len(selected)}
@@ -193,8 +194,8 @@ class BackendTests(unittest.TestCase):
             return 1 if (out/"approved_evidence.json").is_file() else 0
         def coach(out,student,question,policy,teacher_approved):
             self.assertTrue((out/"approved_evidence.json").is_file())
-            return {"mode":"COACHED", "follow_up_question":"비교 기준을 어떻게 정의할까요?","evidence_refs":[]}
-        with patch.dict(os.environ,test_env), \
+            return {"mode":"COACHED","follow_up_question":"비교 기준을 어떻게 정의할까요?","evidence_refs":[]}
+        with patch.dict(os.environ,env), \
              patch.object(private_store,"PrivateArtifactStore",return_value=store), \
              patch.object(nit,"ingest",side_effect=ingest), \
              patch.object(nit,"verified_count",side_effect=verify), \
@@ -202,25 +203,37 @@ class BackendTests(unittest.TestCase):
              patch.object(nit,"coach_question",side_effect=coach), \
              patch.object(nit,"candidates",return_value=[{"page":1,"block_id":"b1","block_sha256":"a"*64}]):
             cid=self.course_id
-            uploaded=self.req("POST",f"/v1/courses/{cid}/materials",self.tf,
-                files={"file":("private.pdf",b"%PDF-1.7\nConfidential","application/pdf")})
-            self.assertEqual(uploaded.status_code,201,uploaded.text)
-            mid=uploaded.json()["id"]
+            request={"filename":"private.pdf","size_bytes":len(payload)}
+            forbidden=self.req("POST",f"/v1/courses/{cid}/uploads/initiate",self.to,json=request)
+            self.assertEqual(forbidden.status_code,403,forbidden.text)
+            init=self.req("POST",f"/v1/courses/{cid}/uploads/initiate",self.tf,json=request)
+            self.assertEqual(init.status_code,201,init.text)
+            response=init.json()
+            self.assertTrue(response["upload_url"].startswith("https://"))
+            upload_id=response["upload_id"]
+            key=f"incoming/{cid}/{upload_id}/source.pdf"
+            fake.put_object(Bucket=store.bucket,Key=key,Body=payload,ContentType="application/pdf")
+            queued=self.req("POST",f"/v1/courses/{cid}/uploads/{upload_id}/complete",self.tf)
+            self.assertEqual(queued.status_code,202,queued.text)
+            self.assertEqual(queued.json()["status"],"QUEUED")
+            self.assertEqual(self.req("GET",f"/v1/courses/{cid}/uploads/{upload_id}",self.to).status_code,403)
+            self.assertEqual(self.req("POST","/v1/internal/ingest/process").status_code,401)
+            worker=self.req("POST","/v1/internal/ingest/process",env["NIT_WORKER_SECRET"])
+            self.assertEqual(worker.status_code,200,worker.text)
+            self.assertEqual(worker.json()["result"],"READY")
+            completed=self.req("GET",f"/v1/courses/{cid}/uploads/{upload_id}",self.tf)
+            self.assertEqual(completed.json()["status"],"READY")
+            self.assertEqual(completed.json()["analysis_coverage"]["audio_status"],"NOT_APPLICABLE_PDF")
             with SessionLocal() as db:
-                record=db.get(Material,mid)
+                record=db.get(Material,upload_id)
                 self.assertTrue(record.out_dir.startswith("s3://learningx-private-lessons/"))
-            self.assertEqual(self.req("GET",f"/v1/materials/{mid}/candidates",self.ts).status_code,403)
-            candidate=self.req("GET",f"/v1/materials/{mid}/candidates",self.tf)
+            self.assertEqual(self.req("GET",f"/v1/materials/{upload_id}/candidates",self.ts).status_code,403)
+            candidate=self.req("GET",f"/v1/materials/{upload_id}/candidates",self.tf)
             self.assertEqual(candidate.status_code,200,candidate.text)
-            self.assertEqual(candidate.json()["approved_count"],0)
-            approved=self.req("POST",f"/v1/materials/{mid}/approve",self.tf,
+            approved=self.req("POST",f"/v1/materials/{upload_id}/approve",self.tf,
                 json={"items":[{"page":1,"block_id":"b1","block_sha256":"a"*64}]})
             self.assertEqual(approved.status_code,200,approved.text)
-            self.assertEqual(self.req("GET",f"/v1/materials/{mid}/candidates",self.tf).json()["approved_count"],1)
             result=self.req("POST",f"/v1/courses/{cid}/questions",self.ts,
-                json={"material_id":mid,"question":"어떤 이론적 기준을 비교할 수 있나요?"})
+                json={"material_id":upload_id,"question":"어떤 이론적 기준을 비교할 수 있나요?"})
             self.assertEqual(result.status_code,201,result.text)
             self.assertEqual(result.json()["coaching"]["mode"],"COACHED")
-            listing=self.req("GET",f"/v1/courses/{cid}/materials",self.ts)
-            self.assertEqual(listing.status_code,200,listing.text)
-            self.assertTrue(any(x["id"]==mid and x["status"]=="FACULTY_SIGNED" for x in listing.json()["items"]))
