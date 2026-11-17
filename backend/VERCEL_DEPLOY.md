@@ -34,6 +34,7 @@ Vercel → learningx-api → Settings → Environment Variables에서 Production
 | `NIT_LLM_API_KEY` | FreeLLMAPI Keys 페이지에서 발급한 현재 유효한 통합 API 키 |
 | `NIT_WORKER_SECRET` | 기존 내부 워커 HTTP 엔드포인트용 32자 이상 별도 비밀키 (Queues 비공개 구독자 자체에서는 불필요) |
 | `NIT_QUEUE_ENABLED` | `1` (Vercel 배포 시 Queues 자동 발행 활성화) |
+| `NIT_WORKER_BACKEND` | `vercel_queue` (다른 작업 디스패처와 혼용 금지) |
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Neon Object Storage 브랜치 발급 자격증명 |
 | `AWS_ENDPOINT_URL_S3` | Neon 프로젝트 `learningx-pilot`의 branch S3 endpoint |
 | `AWS_REGION` | `ap-southeast-1` |
