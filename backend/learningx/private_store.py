@@ -82,7 +82,7 @@ class PrivateArtifactStore:
 
     def _put(self, key, data, content_type):
         self.client.put_object(Bucket=self.bucket, Key=key, Body=data,
-                               ContentType=content_type, ServerSideEncryption="AES256")
+                               ContentType=content_type)
 
     def _get(self, key, max_bytes):
         body = self.client.get_object(Bucket=self.bucket, Key=key)["Body"]
