@@ -1,7 +1,7 @@
 """Evidence-graded lecture boundaries: no bare regex matches from body schedules."""
 import re, unicodedata
 from content_roles import get_text
-WEEK=re.compile(r'(?<!\d)([1-9]|1[0-6])\s*주\s*차|(?<![제\d])([1-9]|1[0-6])\s*강\s*[.:：]?')
+WEEK=re.compile(r'(?<!\d)(?:제\s*)?([1-9]|1[0-6])\s*차\s*시|(?<!\d)([1-9]|1[0-6])\s*주\s*차|(?<![제\d])([1-9]|1[0-6])\s*강\s*[.:：]?')
 FILE_WEEK=re.compile(r'^0?([1-9]|1[0-6])\s*(?:주\s*차|강)(?!\d)')
 
 
@@ -22,7 +22,7 @@ def detect(pages,filename=''):
         prefix='\n'.join(t for _,t in candidate)[:250]
         match=WEEK.search(prefix)
         if not match:continue
-        wk=int(match.group(1) or match.group(2))
+        wk=int(match.group(1) or match.group(2) or match.group(3))
         before=prefix[:match.start()];after=prefix[match.end():match.end()+35]
         if re.search(r'(?:팀프로젝트|진행표|일정|완료|자기소개|마무리)',before[-50:]+after[:20]):continue
         if match.start()>38:continue
