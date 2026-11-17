@@ -219,7 +219,7 @@
     if(state.mode==='demo'){state.demoApproved=true;status('데모 승인 표시만 적용됐습니다. 암호학적 서명은 생성되지 않았습니다.');return;}
     const material=$('faculty-material').value;
     const items=checked.map(x=>({page:x.page,block_id:x.block_id,block_sha256:x.block_sha256}));
-    const result=await api('/v1/materials/'+encodeURIComponent(material)+'/approve',{method:'POST',body:{items}});
+    const result=await api('/v1/materials/'+encodeURIComponent(material)+'/approve',{method:'POST',body:{items,acknowledge_unprocessed_media:$('ack-unprocessed-media').checked}});
     status('서버의 교수자 서명 처리 결과: 승인 '+(result.approved_count||0)+'개 블록.');
     await refreshMaterials('faculty');
   }catch(err){showError(err);}finally{busy(btn,false);}}
