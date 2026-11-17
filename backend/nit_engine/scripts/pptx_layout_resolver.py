@@ -83,7 +83,30 @@ def is_media_control(shape):
         return False
 
 
-def extract_visible(slide,slide_index,width,height):
+def media_icon_hash(shape):
+    """Return the original image identity for a confirmed PPTX media control."""
+    try:
+        return shape.image.sha1 if getattr(shape,"image",None) is not None else None
+    except (AttributeError,ValueError,KeyError):
+        return None
+
+
+def collect_media_control_images(presentation):
+    """One playback image may be reused by audio controls on many slides."""
+    ids=set()
+    def visit(shapes):
+        for shape in shapes:
+            if getattr(shape,"shape_type",None)==6:
+                visit(shape.shapes)
+            elif is_media_control(shape):
+                digest=media_icon_hash(shape)
+                if digest:ids.add(digest)
+    for slide in presentation.slides:
+        visit(slide.shapes)
+    return ids
+
+
+def extract_visible(slide,slide_index,width,height,media_icon_hashes=None):
     blocks=[]; stats=Counter();rects=[]
     def emit(shapes,layer,include_placeholders=False):
         for sh in shapes:
@@ -132,7 +155,7 @@ def extract_visible(slide,slide_index,width,height):
                 blocks.append({**base,'type':'text','text':compact(normalized_text),'raw_text':sh.text,
                                'paragraphs':paragraphs(sh),'glyph_normalizations':arrow_provenance})
             if sh.shape_type==13 or 'PICTURE' in str(sh.shape_type):
-                if is_media_control(sh):
+                if is_media_control(sh) or (media_icon_hashes and media_icon_hash(sh) in media_icon_hashes):
                     stats['media_control_images']+=1
                     # It is not evidence of an educational image/diagram.
                 else:
