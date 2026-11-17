@@ -21,6 +21,34 @@ def bbox(shape,width,height):
                 round(float(shape.left+shape.width)/width,5),round(float(shape.top+shape.height)/height,5)]
     except Exception:return None
 
+def normalized_wingdings_text(shape):
+    """Normalize only run-font-confirmed Wingdings U+F0E0 to a right arrow.
+
+    Inferred/default fonts do not qualify. Every substitution records
+    run position and source glyph so the teacher can audit the decision.
+    """
+    if not getattr(shape,"has_text_frame",False):
+        return getattr(shape,"text","") or "",[]
+    lines=[];provenance=[]
+    for pi,paragraph in enumerate(shape.text_frame.paragraphs):
+        chunks=[]
+        for ri,run in enumerate(paragraph.runs):
+            original=run.text or ""
+            font_name=(run.font.name or "").strip().casefold()
+            if font_name=="wingdings" and "\uf0e0" in original:
+                for offset,ch in enumerate(original):
+                    if ch=="\uf0e0":
+                        provenance.append({"paragraph_index":pi,"run_index":ri,
+                            "offset_in_run":offset,"source_char":"U+F0E0",
+                            "normalized_char":"→","font":"Wingdings",
+                            "rule":"pptx_explicit_run_font_v1"})
+                chunks.append(original.replace("\uf0e0","→"))
+            else:
+                chunks.append(original)
+        lines.append("".join(chunks) if chunks else paragraph.text)
+    return "\n".join(lines),provenance
+
+
 def paragraphs(shape):
     if not getattr(shape,'has_text_frame',False):return []
     result=[]
@@ -33,9 +61,11 @@ def paragraphs(shape):
             try:
                 if r.font.color and r.font.color.type and r.font.color.rgb:c=str(r.font.color.rgb)
             except (AttributeError,ValueError):pass
-            runs.append({'text':r.text,'bold':r.font.bold,'italic':r.font.italic,'color_rgb':c,
+            display=r.text.replace('\uf0e0','→') if (r.font.name or '').casefold()=='wingdings' else r.text
+            runs.append({'text':display,'raw_text':r.text,'font':r.font.name,
+                         'bold':r.font.bold,'italic':r.font.italic,'color_rgb':c,
                          'hyperlink':getattr(r.hyperlink,'address',None)})
-        result.append({'text':par.text,'level':par.level,'runs':runs})
+        result.append({'text':''.join(r['text'] for r in runs) if runs else par.text,'level':par.level,'runs':runs})
     return result
 
 def is_media_control(shape):
@@ -68,11 +98,13 @@ def extract_visible(slide,slide_index,width,height):
                   'source_type':{'slide':'slide_body','layout':'slide_layout','master':'slide_master'}[layer],
                   'source_page':slide_index,'object_id':sh.shape_id,'bbox':box,
                   'requires_visual_confirmation':layer!='slide'}
-            if layer!='slide' and getattr(sh,'has_text_frame',False) and compact(sh.text):
-                txt=compact(sh.text)
+            normalized_text,arrow_provenance=normalized_wingdings_text(sh)
+            if layer!='slide' and getattr(sh,'has_text_frame',False) and compact(normalized_text):
+                txt=compact(normalized_text)
                 if any(b.get('text')==txt for b in blocks):continue
                 blocks.append({**base,'type':'text','text':txt,'raw_text':sh.text,
-                               'paragraphs':paragraphs(sh),'visible_candidate':True})
+                               'paragraphs':paragraphs(sh),'glyph_normalizations':arrow_provenance,
+                               'visible_candidate':True})
                 stats['inherited_text_blocks']+=1
                 continue
             if layer!='slide':continue
@@ -96,9 +128,9 @@ def extract_visible(slide,slide_index,width,height):
                 blocks.append({**base,'type':'chart','chart_data':data,'text':'',
                                'verification':'unverified_chart_data'})
                 stats['charts']+=1
-            if getattr(sh,'has_text_frame',False) and compact(sh.text):
-                blocks.append({**base,'type':'text','text':compact(sh.text),'raw_text':sh.text,
-                               'paragraphs':paragraphs(sh)})
+            if getattr(sh,'has_text_frame',False) and compact(normalized_text):
+                blocks.append({**base,'type':'text','text':compact(normalized_text),'raw_text':sh.text,
+                               'paragraphs':paragraphs(sh),'glyph_normalizations':arrow_provenance})
             if sh.shape_type==13 or 'PICTURE' in str(sh.shape_type):
                 if is_media_control(sh):
                     stats['media_control_images']+=1
