@@ -237,3 +237,28 @@ class BackendTests(unittest.TestCase):
                 json={"material_id":upload_id,"question":"어떤 이론적 기준을 비교할 수 있나요?"})
             self.assertEqual(result.status_code,201,result.text)
             self.assertEqual(result.json()["coaching"]["mode"],"COACHED")
+
+    def test_13_narrated_pptx_requires_faculty_acknowledgment(self):
+        from learningx import private_store
+        with tempfile.TemporaryDirectory(prefix="learningx-audio-") as temp:
+            folder=Path(temp)
+            (folder/"document.json").write_text(json.dumps({
+                "source":{"type":"pptx","sha256":"f"*64},
+                "media_coverage":{"audio_status":"NOT_ANALYZED",
+                                  "embedded_audio_assets":1},
+                "pages":[]}),encoding="utf8")
+            with SessionLocal() as db:
+                material=Material(course_id=self.course_id,filename="lecture.pptx",
+                    sha256="f"*64,out_dir=str(folder),ingested_by=self.faculty_id)
+                db.add(material);db.commit()
+                mid=material.id
+            payload={"items":[{"page":1,"block_id":"b1","block_sha256":"a"*64}]}
+            with patch.object(nit,"approve_material",return_value={"approved":1}) as sign, \
+                 patch.object(private_store,"persist_approval",return_value=None):
+                blocked=self.req("POST",f"/v1/materials/{mid}/approve",self.tf,json=payload)
+                self.assertEqual(blocked.status_code,409,blocked.text)
+                sign.assert_not_called()
+                payload["acknowledge_unprocessed_media"]=True
+                allowed=self.req("POST",f"/v1/materials/{mid}/approve",self.tf,json=payload)
+                self.assertEqual(allowed.status_code,200,allowed.text)
+                sign.assert_called_once()
