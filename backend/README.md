@@ -106,4 +106,4 @@ python -m unittest discover -s tests -v
 
 ## 파일럿 배포 전 검증
 
-개발 브랜치에서 [대용량 교안 P0 업로드·분석 계약](UPLOAD_ARCHITECTURE.md)을 구현 중입니다. **자동 작업 디스패처는 아직 연결되지 않아 QUEUED 작업이 자동 실행되지는 않습니다.** 오디오 미분석 PPTX의 근거 승인에는 교수자의 명시적 고지가 필요합니다. 32.9MB 실물 PPTX, 367쪽 PDF, 실제 Neon 브라우저 PUT, 워커 timeout 복구, 모델 호출 품질 등 실환경 검증을 완료해야 합니다.
+개발 브랜치에서 [대용량 교안 P0 업로드·분석 계약](UPLOAD_ARCHITECTURE.md)을 구현 중입니다. **Python Vercel Queues 디스패치·구독 코드를 추가했으며, 배포·실제 메시지 전달은 검증되지 않았습니다.** 오디오 미분석 PPTX의 근거 승인에는 교수자의 명시적 고지가 필요합니다. 32.9MB 실물 PPTX, 367쪽 PDF, 실제 Neon 브라우저 PUT, 워커 timeout 복구, 모델 호출 품질 등 실환경 검증을 완료해야 합니다.
