@@ -60,3 +60,7 @@ GitHub 테스트는 Fake S3, Mock NIT parser, 합성 PPTX를 사용한 접근제
 - Neon 비공개 S3의 브라우저 PUT에는 버킷 CORS가 필요합니다. `backend/scripts/configure_neon_cors.py`를 자격증명을 가진 운영자 환경에서 실행하고 AllowedOrigins를 배포된 프론트엔드 정확한 Origin으로 한정해야 합니다.
 
 참고: https://vercel.com/docs/queues · https://pypi.org/project/vercel-queue/
+
+## 실행 모드 충돌 방지
+
+프로덕션에서는 **`NIT_WORKER_BACKEND=vercel_queue`**, `NIT_QUEUE_ENABLED=1`을 명시적으로 설정하여 Python Vercel Queues 구독자를 사용합니다. GitHub Actions `repository_dispatch`용 실험적 호환 코드가 남아 있지만, 해당 워크플로 실행·비밀키·권한 검증을 끝내기 전에는 **`NIT_WORKER_BACKEND=github_actions`를 사용하지 않습니다.** 두 백엔드를 동시에 켜지 않습니다. 367페이지 PDF 등 300초를 넘는 분석은 별도 장기 실행 워커를 검증한 후 전환합니다.
