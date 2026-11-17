@@ -17,6 +17,8 @@
 - 정적 파일을 그대로 게시하며 `frontend/vercel.json`의 보안 헤더 적용.
 - **프론트엔드 환경변수에 FreeLLMAPI Key, JWT 서명키, 교수자 승인 서명키를 넣지 않습니다.** 모든 민감 키는 실제 백엔드에서만 관리합니다.
 
+> **배포 재실행:** Vercel 프로젝트 Root Directory를 `frontend`로 변경한 뒤 GitHub `main`에 새 커밋을 푸시하면 연결된 Vercel Git Integration이 현재 설정으로 새로운 배포를 생성합니다. 프론트엔드 프로젝트만 배포하며 `backend/`는 포함하지 않습니다.
+
 ## Vercel 배포 오류: FASTAPI_ENTRYPOINT_NOT_FOUND
 
 이 에러가 `learningx/api.py`를 찾았다고 표시하면 Vercel이 **정적 프론트엔드가 아닌 `backend/`에서 FastAPI를 빌드**하려는 상태일 가능성이 높습니다. 해당 에러를 해결하려고 백엔드에 `main.py`를 새로 만들지 마세요.
