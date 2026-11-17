@@ -25,7 +25,7 @@ from . import engine_adapter as nit, private_store
 router=APIRouter(prefix="/v1")
 MAX_UPLOAD_BYTES=100 * 1024 * 1024  # 32.9 MB PPTX supported; can lift only after budget tests.
 UPLOAD_TTL_SECONDS=900
-JOB_LEASE_SECONDS=270
+JOB_LEASE_SECONDS=600  # Longer than Vercel Hobby's 300s cap; avoid concurrent double-claim
 MAX_ATTEMPTS=3
 MIME={".pdf":"application/pdf",
       ".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
