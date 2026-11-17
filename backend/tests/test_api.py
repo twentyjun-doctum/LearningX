@@ -163,3 +163,64 @@ class BackendTests(unittest.TestCase):
             r=self.req("POST",f"/v1/courses/{cid}/materials",self.to,
                 files={"file":("lesson.pdf",b"%PDF-1.7\\nTest","application/pdf")})
             self.assertEqual(r.status_code,403,r.text)
+
+    def test_12_serverless_s3_upload_approve_and_coach_roundtrip(self):
+        from learningx import private_store
+        from learningx.private_store import PrivateArtifactStore
+        from test_store import FakeS3
+        test_env={
+            "NIT_SERVERLESS_RUNTIME":"1",
+            "AWS_ACCESS_KEY_ID":"local-test-key",
+            "AWS_SECRET_ACCESS_KEY":"local-test-secret",
+            "AWS_ENDPOINT_URL_S3":"https://test.neon.invalid",
+            "AWS_REGION":"ap-southeast-1",
+            "NIT_STORAGE_BUCKET":"learningx-private-lessons",
+        }
+        fake=FakeS3()
+        store=PrivateArtifactStore.__new__(PrivateArtifactStore)
+        store.bucket="learningx-private-lessons"
+        store.client=fake
+        def ingest(source,out):
+            out.mkdir(parents=True)
+            document={"source":{"sha256":hashlib.sha256(source.read_bytes()).hexdigest()},
+                      "pages":[{"page":1,"blocks":[]}]}
+            (out/"document.json").write_text(json.dumps(document),encoding="utf8")
+            return document
+        def sign(out,reviewer,selected):
+            (out/"approved_evidence.json").write_text('{"signature":"faculty"}',encoding="utf8")
+            return {"approved":len(selected)}
+        def verify(out):
+            return 1 if (out/"approved_evidence.json").is_file() else 0
+        def coach(out,student,question,policy,teacher_approved):
+            self.assertTrue((out/"approved_evidence.json").is_file())
+            return {"mode":"COACHED", "follow_up_question":"비교 기준을 어떻게 정의할까요?","evidence_refs":[]}
+        with patch.dict(os.environ,test_env), \
+             patch.object(private_store,"PrivateArtifactStore",return_value=store), \
+             patch.object(nit,"ingest",side_effect=ingest), \
+             patch.object(nit,"verified_count",side_effect=verify), \
+             patch.object(nit,"approve_material",side_effect=sign), \
+             patch.object(nit,"coach_question",side_effect=coach), \
+             patch.object(nit,"candidates",return_value=[{"page":1,"block_id":"b1","block_sha256":"a"*64}]):
+            cid=self.course_id
+            uploaded=self.req("POST",f"/v1/courses/{cid}/materials",self.tf,
+                files={"file":("private.pdf",b"%PDF-1.7\nConfidential","application/pdf")})
+            self.assertEqual(uploaded.status_code,201,uploaded.text)
+            mid=uploaded.json()["id"]
+            with SessionLocal() as db:
+                record=db.get(Material,mid)
+                self.assertTrue(record.out_dir.startswith("s3://learningx-private-lessons/"))
+            self.assertEqual(self.req("GET",f"/v1/materials/{mid}/candidates",self.ts).status_code,403)
+            candidate=self.req("GET",f"/v1/materials/{mid}/candidates",self.tf)
+            self.assertEqual(candidate.status_code,200,candidate.text)
+            self.assertEqual(candidate.json()["approved_count"],0)
+            approved=self.req("POST",f"/v1/materials/{mid}/approve",self.tf,
+                json={"items":[{"page":1,"block_id":"b1","block_sha256":"a"*64}]})
+            self.assertEqual(approved.status_code,200,approved.text)
+            self.assertEqual(self.req("GET",f"/v1/materials/{mid}/candidates",self.tf).json()["approved_count"],1)
+            result=self.req("POST",f"/v1/courses/{cid}/questions",self.ts,
+                json={"material_id":mid,"question":"어떤 이론적 기준을 비교할 수 있나요?"})
+            self.assertEqual(result.status_code,201,result.text)
+            self.assertEqual(result.json()["coaching"]["mode"],"COACHED")
+            listing=self.req("GET",f"/v1/courses/{cid}/materials",self.ts)
+            self.assertEqual(listing.status_code,200,listing.text)
+            self.assertTrue(any(x["id"]==mid and x["status"]=="FACULTY_SIGNED" for x in listing.json()["items"]))
