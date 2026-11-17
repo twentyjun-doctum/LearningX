@@ -80,6 +80,37 @@ def pdf_pages(path):
                    'width':round(page.rect.width,1),'height':round(page.rect.height,1)}
 
 
+def pptx_media_coverage(path):
+    """Detect embedded audio/video and external audio links; never transcribe."""
+    import zipfile
+    from xml.etree import ElementTree
+    aext={'.mp3','.m4a','.wav','.aac','.wma','.ogg','.flac','.aif','.aiff'}
+    vext={'.mp4','.m4v','.mov','.avi','.wmv','.webm'}
+    audio=[];video=[];external_audio=0
+    with zipfile.ZipFile(path) as archive:
+        for name in archive.namelist():
+            if not name.startswith('ppt/media/') or name.endswith('/'):continue
+            ext=Path(name).suffix.lower()
+            if ext in aext:audio.append(name)
+            elif ext in vext:video.append(name)
+        for name in archive.namelist():
+            if not name.startswith('ppt/slides/_rels/') or not name.endswith('.rels'):continue
+            try:
+                root=ElementTree.fromstring(archive.read(name))
+                for rel in root:
+                    if rel.attrib.get('TargetMode')=='External' and rel.attrib.get('Type','').lower().endswith('/audio'):
+                        external_audio+=1
+            except (ElementTree.ParseError,ValueError):
+                external_audio+=1
+    detected=len(audio)+external_audio
+    return {'audio_status':'NOT_ANALYZED' if detected else 'NOT_DETECTED',
+            'embedded_audio_assets':len(audio),'external_audio_links':external_audio,
+            'video_status':'NOT_ANALYZED' if video else 'NOT_DETECTED',
+            'embedded_video_assets':len(video),
+            'warning':('PPTX narration/audio was not transcribed or considered as evidence.'
+                      if detected else 'No embedded audio detected; external recordings are not checked.')}
+
+
 def pptx_pages(path):
     from pptx import Presentation
     from pptx_layout_resolver import extract_visible
@@ -282,6 +313,11 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
         if pg.get('parser_selection',{}).get('coaching_hold'):
             pg['quality_state']='PARSER_REVIEW_REQUIRED'
             for b in pg['blocks']:b['quality']['eligible_for_coaching']=False
+    if source.suffix.lower()=='.pptx':
+        document['media_coverage']=pptx_media_coverage(source)
+        document['analysis_caveats']=['PPTX narration/audio was not transcribed or considered as coaching evidence']
+    else:
+        document['media_coverage']={'audio_status':'NOT_APPLICABLE_PDF'}
     document['parser_arbitration']=arbitration_summary
     from canonical_ir import save as save_canonical_ir
     save_canonical_ir(out,document)
@@ -308,13 +344,15 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
               'semantic_jobs':len(sections(pages,section_size,source.name)),
               'native_seconds':round(time.perf_counter()-t,3),
               'state':('LIMITED_TEXT_INDEX_VISUAL_UNKNOWN' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else 'FAST_INDEX_READY_DEEP_PENDING'),'visual_inspection_status':('unknown' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else 'inspected_routing_only'), 'not_done':['AI understanding','OCR/vision for flagged pages','embedding indexing','human QA']}
+    manifest['media_coverage']=document.get('media_coverage',{})
+    if source.suffix.lower()=='.pptx':
+        manifest['not_done'].append('PPTX narration/audio transcription')
     write_json(out/'manifest.json',manifest)
     from quality_gate import audit
     from recovery_plan import plan
     audit(out);plan(out)
-    if source.suffix.lower()=='.pdf':
-        from parser_audit import audit as parser_audit
-        parser_audit(out)
+    from parser_audit import audit as parser_audit
+    parser_audit(out)
     return {'cache_hit':False,**manifest,'out':str(out)}
 
 if __name__=='__main__':
