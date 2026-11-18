@@ -183,6 +183,8 @@ class PrivateArtifactStore:
             root = Path(folder)
             for item in manifest["files"]:
                 rel = _safe_name(item["path"])
+                if rel == "parsed/live-preview.pdf":
+                    continue
                 raw = self._get(item["key"], item["size"])
                 if len(raw) != item["size"] or _sha(raw) != item["sha256"]:
                     raise HTTPException(503, "Private artifact integrity check failed")
@@ -262,3 +264,13 @@ def read_material_artifact(record, name, limit):
                     raise HTTPException(413, "Artifact is too large")
                 return raw
     raise HTTPException(404, "Artifact not found")
+
+
+
+def has_material_artifact(record, name):
+    name = _safe_name(name)
+    if record.out_dir.startswith("s3://"):
+        store = require_store()
+        return any(item["path"] == name for item in store._manifest(store.parse_ref(record))["files"])
+    with material_workspace(record) as out:
+        return (out / name.removeprefix("parsed/")).is_file()

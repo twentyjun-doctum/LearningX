@@ -41,6 +41,30 @@ jobs:
           assert Path("/app/learningx/northflank_worker.py").is_file()
           print("Northflank image structural check passed")
           '
+      - name: Validate PPTX preview in an isolated worker container
+        if: matrix.deep_runtime == 0
+        run: |
+          docker run --rm -i --memory 512m --entrypoint python learningx-northflank:test - <<'PY'
+          from pathlib import Path
+          from tempfile import TemporaryDirectory
+          import pymupdf
+          from pptx import Presentation
+          from learningx.pptx_preview import generate_preview
+          with TemporaryDirectory() as tmp:
+              root = Path(tmp)
+              source = root / "deck.pptx"
+              deck = Presentation()
+              for number in range(1, 4):
+                  slide = deck.slides.add_slide(deck.slide_layouts[5])
+                  slide.shapes.title.text = f"Slide {number}"
+                  if number == 2:
+                      slide._element.set("show", "0")
+              deck.save(source)
+              assert generate_preview(source, root, 3)
+              with pymupdf.open(root / "live-preview.pdf") as pdf:
+                  assert len(pdf) == 3
+                  assert "Slide 3" in pdf[2].get_text()
+          PY
       - name: Verify missing production secrets fail closed
         run: |
           set +e

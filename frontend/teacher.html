@@ -101,14 +101,11 @@
   <section id="screen-live" data-screen hidden>
     <section class="card live-slide" id="teacher-slide">
       <div class="row between"><strong>교안 송출</strong><span data-live-page></span></div>
-      <form id="slide-share-form" class="row">
-        <label for="share-page">송출할 페이지</label>
-        <input id="share-page" type="number" min="1" value="1" required>
-        <button class="btn sm" type="submit">이 페이지 송출</button>
+      <div class="row live-controls">
         <button class="btn sm" id="share-prev" type="button">이전 페이지</button>
         <button class="btn sm" id="share-next" type="button">다음 페이지</button>
         <button class="btn sm" id="share-fullscreen" type="button">전체 화면</button>
-      </form>
+      </div>
       <p class="muted" data-live-status role="status"></p>
       <div class="live-slide-layout"><div data-live-content></div><div data-live-index aria-label="현재 페이지의 질문 색인"></div></div>
     </section>

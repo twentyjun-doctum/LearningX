@@ -250,7 +250,7 @@ def _download_verified(store,job,path):
     return hasher.hexdigest()
 
 
-def process_next_job(job_id=None):
+def process_next_job(job_id=None, *, prepare_live_preview=False):
     """Perform one leased job by ID; repeated queue messages are idempotent."""
     with SessionLocal() as db:
         claimed=_claim(db,job_id)
@@ -289,6 +289,19 @@ def process_next_job(job_id=None):
                 stage = "optional_analysis"
                 from .deep_analysis import enrich
                 document = enrich(original, parsed, nit.root())
+                preview_ready = None
+                if ext == ".pptx" and prepare_live_preview:
+                    from .pptx_preview import generate_preview
+                    stage = "live_preview"
+                    preview_ready = generate_preview(original, parsed, len(document["pages"]))
+                    if preview_ready:
+                        artifacts = [path for path in root.rglob("*") if path.is_file()]
+                        if (len(artifacts) > private_store.MAX_FILES
+                                or sum(path.stat().st_size for path in artifacts) > private_store.MAX_TOTAL_BYTES):
+                            (parsed / "live-preview.pdf").unlink()
+                            preview_ready = False
+                    if not preview_ready:
+                        logger.warning("learningx_live_preview_unavailable")
                 stage = "publish"
                 location=store.publish_new(root,row.course_id,row.id)
                 stage = "database_commit"
@@ -301,6 +314,7 @@ def process_next_job(job_id=None):
                 coverage["semantic_analysis"] = "NOT_RUN"
                 coverage["faculty_approval_required"] = True
                 if ext==".pptx":
+                    coverage["live_preview"] = "READY" if preview_ready else "UNAVAILABLE"
                     coverage.setdefault("audio_status","UNKNOWN_NOT_VERIFIED")
                     coverage.setdefault("warning","PPTX narration was not transcribed")
                 # Never attach an unverified parsed document to a different course.
