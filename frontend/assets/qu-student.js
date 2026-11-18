@@ -12,7 +12,6 @@
     current: null,      // {id, level, original}
     stage: 'seed',
     sentCount: 0,
-    poll: null,
     sending: false,
   };
   const api = client(() => token, () => {
@@ -52,7 +51,12 @@
     for (const s of document.querySelectorAll('[data-screen]')) s.hidden = s.id !== 'screen-' + name;
     window.scrollTo(0, 0);
   }
-  function stopPoll() { if (st.poll) clearInterval(st.poll); st.poll = null; }
+  let liveView;
+  function stopPoll() {
+    liveView?.stop();
+    liveView = null;
+    $('student-slide').hidden = true;
+  }
 
   function setStage(stage) {
     st.stage = stage;
@@ -117,7 +121,16 @@
     resetThread();
     applyStatus(st.session.status);
     stopPoll();
-    st.poll = setInterval(pollStatus, 15000);
+    liveView = window.QU.createLiveView({
+      api, session: st.session.id, panel: $('student-slide'),
+      onState: ({status}) => {
+        if (status !== st.session.status) applyStatus(status);
+      },
+      onQuestion: async (id) => {
+        await showMine();
+        document.getElementById('my-indexed-' + id)?.scrollIntoView({block: 'center'});
+      },
+    });
   }
 
   function resetThread() {
@@ -162,7 +175,7 @@
     try {
       const res = st.current
         ? await api(`/v1/session-questions/${st.current.id}/revisions`, { method: 'POST', body: { text }, timeout: 90000 })
-        : await api(`/v1/sessions/${st.session.id}/questions`, { method: 'POST', body: { question: text }, timeout: 90000 });
+        : await api(`/v1/sessions/${st.session.id}/questions`, { method: 'POST', body: { question: text, slide_page: liveView?.page() }, timeout: 90000 });
       typing.remove();
       if (!st.current) st.current = { id: res.id, original: text };
       st.current.level = res.level;
@@ -278,15 +291,16 @@
     $('mine-closed').hidden = !closed;
     $('mine-back').hidden = closed;
     $('mine-rejoin').hidden = !closed;
-    const sent = items.filter((x) => x.submitted);
+    const sent = items;
     if (!sent.length) {
-      $('mine-list').replaceChildren(el('div', { class: 'empty', text: '아직 보낸 질문이 없어요.' }));
+      $('mine-list').replaceChildren(el('div', { class: 'empty', text: '아직 작성한 질문이 없어요.' }));
       return;
     }
-    $('mine-list').replaceChildren(...sent.map((q) => el('div', { class: 'sent-card' },
+    $('mine-list').replaceChildren(...sent.map((q) => el('div', { class: 'sent-card', id: 'my-indexed-' + q.id },
       el('div', { class: 'row between' }, el('span', { class: `lv ${q.level}`, text: `${q.level_label} 질문` }),
         el('span', { class: 'muted', text: q.submitted_at ? new Date(q.submitted_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : '' })),
-      q.original !== q.text ? el('span', { class: 'muted', text: `처음 질문 · ${q.original}` }) : null,
+      el('span', {class: 'muted', text: [q.slide_page ? q.slide_page + '쪽' : '', q.submitted ? '전송됨' : '작성 중'].filter(Boolean).join(' · ')}),
+      q.original !== q.text ? el('span' , { class: 'muted', text: `처음 질문 · ${q.original}` }) : null,
       el('b', { text: q.original !== q.text ? `다시 쓴 질문 · ${q.text}` : q.text }))));
   }
   $('mine-back').addEventListener('click', () => { showScreen('coach'); if (!st.current) resetThread(); updateComposer(); });

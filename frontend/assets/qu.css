@@ -208,3 +208,16 @@ button,input,textarea,select{font:inherit;color:inherit}
 .qcard .acts{display:flex;gap:8px;margin-left:auto}
 .qcard.is-hidden{opacity:.55}
 .projector.code-mode .q{justify-content:center;font-size:clamp(72px,14vw,200px);letter-spacing:.14em;max-width:none}
+
+.live-slide {margin: 1rem auto; width: min(100% - 2rem, 960px);}
+.live-slide:fullscreen {width: 100%; max-width: none; margin: 0; overflow: auto; background: #fff;}
+.live-slide-layout {display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .65rem;}
+.live-slide [data-live-index] {display: flex; flex-direction: column; gap: .25rem; max-height: 60vh; overflow: auto;}
+.live-slide img {display: block; max-width: 100%; max-height: 75vh; margin: auto; object-fit: contain;}
+.live-slide-text {white-space: pre-wrap; overflow-wrap: anywhere;}
+.live-tab {border: 0; border-radius: .25rem; padding: .25rem .45rem; cursor: pointer; font: inherit;}
+.live-tab.shallow {background: #e3e9e5; color: #3c4943;}
+.live-tab.mid {background: #bceacf; color: #0d5c4c;}
+.live-tab.deep {background: #13806a; color: #fff;}
+#share-page {width: 5rem;}
+#slide-share-form {flex-wrap: wrap;}

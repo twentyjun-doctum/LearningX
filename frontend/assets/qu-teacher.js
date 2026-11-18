@@ -30,7 +30,9 @@
     if (on) { btn.dataset.label = btn.textContent; btn.textContent = label || '처리 중…'; btn.disabled = true; }
     else { if (btn.dataset.label) btn.textContent = btn.dataset.label; btn.disabled = false; }
   }
+  let liveView;
   function stopTimers() {
+    liveView?.stop();
     if (state.live && state.live.timer) clearInterval(state.live.timer);
     if (state.upload && state.upload.timer) clearTimeout(state.upload.timer);
     if (state.tick) clearInterval(state.tick);
@@ -385,6 +387,22 @@
     const prev = state.live && state.live.session.id === sessionId ? state.live : null;
     state.live = { session, level: prev ? prev.level : 'all', seen: prev ? prev.seen : null, timer: null };
     screen('live');
+    $('share-page').value = '1';
+    liveView = window.QU.createLiveView({
+      api, session: sessionId, panel: $('teacher-slide'),
+      onState: ({slide, status}) => {
+        if (slide) $('share-page').max = slide.total;
+        $('share-prev').disabled = !slide || slide.page <= 1;
+        $('share-next').disabled = Boolean(slide && slide.page >= slide.total);
+        if (status === 'CLOSED') go(`end/${sessionId}`);
+      },
+      onQuestion: async (id) => {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        setFilter('all');
+        await refreshBoard();
+        document.getElementById('indexed-' + id)?.scrollIntoView({block: 'center'});
+      },
+    });
     paintLiveHeader();
     $('live-code').textContent = session.join_code || '––––––';
     $('live-url').textContent = location.host + location.pathname.replace(/teacher\.html$/, '');
@@ -392,6 +410,38 @@
     await refreshBoard();
     state.live.timer = setInterval(refreshBoard, 5000);
   }
+
+  async function broadcast(page) {
+    const button = $('slide-share-form').querySelector('[type=submit]');
+    if (button.disabled) return;
+    busy(button, true, '송출 중…');
+    try {
+      await api(`/v1/sessions/${state.live.session.id}/live`, {method: 'PUT', body: {page}});
+      $('share-page').value = String(page);
+    } catch (err) {
+      setError($('global-error'), err.status === 422 ? '송출할 수 없는 페이지입니다.' : err);
+    } finally {
+      busy(button, false);
+    }
+  }
+
+  $('slide-share-form').addEventListener('submit', e => {
+    e.preventDefault();
+    broadcast(Number($('share-page').value));
+  });
+  $('share-prev').addEventListener('click', () => {
+    const page = liveView?.page();
+    if (page > 1) broadcast(page - 1);
+  });
+  $('share-next').addEventListener('click', () => broadcast((liveView?.page() || 0) + 1));
+  $('share-fullscreen').addEventListener('click', async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await $('teacher-slide').requestFullscreen();
+    } catch (err) {
+      setError($('global-error'), err);
+    }
+  });
 
   function paintLiveHeader() {
     const s = state.live.session;
@@ -455,7 +505,7 @@
 
   function questionCard(q, isNew) {
     const cls = ['qcard', q.projected ? 'projected' : '', isNew ? 'is-new' : '', q.hidden ? 'is-hidden' : ''].filter(Boolean).join(' ');
-    return el('article', { class: cls },
+    return el('article', { class: cls, id: 'indexed-' + q.id },
       el('span', { class: `edge ${q.level}` }),
       el('div', { class: 'body' },
         el('p', { class: 'q', text: q.text }),
