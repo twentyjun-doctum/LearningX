@@ -83,13 +83,14 @@ class ClassroomTests(unittest.TestCase):
             self.assertEqual(snap["text"], "Shared slide")
             self.assertNotIn("text", self.req("GET", path + "/live?version=" + snap["version"], first).json()["slide"])
             self.req("PUT", path + "/live", self.tf, json={"page": 2})
-        anchor = {"x": .31, "y": .52, "quote": "선택한 교안 문구"}
+        anchor = {"x": .31, "y": .52, "quote": "선택한 교안 문구",
+                  "rects": [{"left": .2, "top": .5, "right": .4, "bottom": .54}]}
         reaction = path + "/live/confusion"
         self.assertEqual(self.req("PUT", reaction, first, json={"page": 1, "anchor": anchor}).status_code, 409)
         for _ in range(2):
             self.assertEqual(self.req("PUT", reaction, first, json={"page": 2, "anchor": anchor}).status_code, 200)
         summary = self.req("GET", path + "/live", self.tf).json()["confusion"]
-        self.assertEqual(summary, {"count": 1, "spots": [{"x": .3, "y": .5, "count": 1}]})
+        self.assertEqual(summary, {"count": 1, "spots": [{"x": .3, "y": .5, "count": 1, "rects": anchor["rects"]}]})
         self.assertIsNone(self.req("GET", path + "/live", second).json()["confusion"])
         self.assertTrue(self.req("GET", path + "/live", first).json()["confusion"]["mine"])
         with patch.object(nit, "coach_question", return_value=coaching("analyze")):
