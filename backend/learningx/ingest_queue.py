@@ -272,6 +272,9 @@ def process_next_job(job_id=None):
                 document=nit.ingest(original,parsed)
                 if document["source"]["sha256"]!=digest:
                     raise ValueError("Parser source digest mismatch")
+                stage = "optional_analysis"
+                from .deep_analysis import enrich
+                document = enrich(original, parsed, nit.root())
                 stage = "publish"
                 location=store.publish_new(root,row.course_id,row.id)
                 stage = "database_commit"
@@ -280,12 +283,7 @@ def process_next_job(job_id=None):
                 coverage["vision"] = document.get("vision_execution", {
                     "status": "UNKNOWN", "completed_jobs": 0,
                 })
-                coverage["ocr"] = {
-                    "status": "PENDING" if any(
-                        page.get("ocr_state") in ("queued", "failed")
-                        for page in document.get("pages", [])
-                    ) else "NOT_REQUIRED",
-                }
+                coverage["ocr"] = document["deep_analysis"]["ocr"]
                 coverage["semantic_analysis"] = "NOT_RUN"
                 coverage["faculty_approval_required"] = True
                 if ext==".pptx":
