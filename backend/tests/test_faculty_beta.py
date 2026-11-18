@@ -84,6 +84,10 @@ class FacultyBetaTests(unittest.TestCase):
                 assert poll_once()["result"] == "READY"
                 status = client.get(path, headers=headers).json()
                 assert status["status"] == "READY"
+                assert status["analysis_coverage"]["native_extraction"] == "COMPLETE"
+                assert status["analysis_coverage"]["vision"]["status"] == "NOT_RUN"
+                assert status["analysis_coverage"]["semantic_analysis"] == "NOT_RUN"
+                assert status["analysis_coverage"]["faculty_approval_required"] is True
                 material_id = status["material_id"]
                 url = f"/v1/materials/{material_id}"
                 candidates = client.get(url + "/candidates", headers=headers).json()["eligible_candidates"]
