@@ -387,11 +387,9 @@
     const prev = state.live && state.live.session.id === sessionId ? state.live : null;
     state.live = { session, level: prev ? prev.level : 'all', seen: prev ? prev.seen : null, timer: null };
     screen('live');
-    $('share-page').value = '1';
     liveView = window.QU.createLiveView({
       api, session: sessionId, panel: $('teacher-slide'), faculty: true,
-      onState: ({slide, status, total}) => {
-        if (total || slide) $('share-page').max = total || slide.total;
+      onState: ({slide, status}) => {
         if (slide && state.live?.lastRequestedPage === slide.page) state.live.lastRequestedPage = undefined;
         if (status === 'CLOSED') go(`end/${sessionId}`);
       },
@@ -416,7 +414,6 @@
     if (!live || !view || !Number.isInteger(page) || page < 1 || page > (view.total() ?? Infinity)) return;
     live.requestedPage = page;
     live.lastRequestedPage = page;
-    $('share-page').value = String(page);
     view.select(page);
     if (live.sendingPage) return;
     live.sendingPage = true;
@@ -425,7 +422,8 @@
         const next = live.requestedPage;
         live.requestedPage = undefined;
         try {
-          await api(`/v1/sessions/${live.session.id}/live`, {method: 'PUT', body: {page: next}});
+          const result = await api(`/v1/sessions/${live.session.id}/live`, {method: 'PUT', body: {page: next}});
+          view.acknowledge(result);
           setError($('global-error'), null);
         } catch (err) {
           if (state.live !== live || liveView !== view) return;
@@ -441,13 +439,9 @@
     }
   }
 
-  $('slide-share-form').addEventListener('submit', e => {
-    e.preventDefault();
-    broadcast(Number($('share-page').value));
-  });
   function moveSlide(delta) {
-    const current = state.live?.lastRequestedPage ?? liveView?.target() ?? 0;
-    broadcast(current + delta);
+    const next = liveView?.neighbor(delta);
+    if (next) broadcast(next);
   }
   $('share-prev').addEventListener('click', () => moveSlide(-1));
   $('share-next').addEventListener('click', () => moveSlide(1));
