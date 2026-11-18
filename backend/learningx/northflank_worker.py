@@ -33,7 +33,7 @@ def validate_config():
 def poll_once():
     # Import after runtime validation; storage.py establishes a DB pool on import.
     from .ingest_queue import process_next_job
-    return process_next_job()
+    return process_next_job(prepare_live_preview=True)
 
 
 def run(stop_event=None, poll_interval=None):
