@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, Session, mapped_column
@@ -27,7 +28,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, QuestionSlide, build_snapshot
+from .live_slides import LiveSlide, QuestionSlide, build_snapshot, notify, page_pdf, revision, source_pdf, wait_for_update
 from .security import actor, issue_token, require_course, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
@@ -287,18 +288,34 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
         s.closed_at = now()
     _audit(db, user.id, s.course_id, "session_" + data.status.lower(), s.material_id)
     db.commit()
+    notify(s.id)
     return _public_session(db, s, faculty=True)
 
 
 @router.get("/sessions/{session_id}/live")
-def live_snapshot(session_id: str, response: Response, version: str = "", db: Session = Depends(session),
-                  user: User = Depends(actor)):
+async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
+                        after: str | None = None, db: Session = Depends(session), user: User = Depends(actor)):
+    if after is not None and after == revision(session_id):
+        await run_in_threadpool(_live_access, db, session_id, user)
+        await run_in_threadpool(db.rollback)
+        await wait_for_update(session_id, after, request)
+    stamp = revision(session_id)
+    response.headers["Cache-Control"] = "no-store"
+    snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version)
+    return {**snapshot, "revision": stamp}
+
+
+def _live_access(db, session_id, user):
     current = _session_or_404(db, session_id)
     member = db.query(Member).filter_by(course_id=current.course_id, user_id=user.id).first()
     faculty = member is not None and member.role == "faculty"
     if not faculty:
         _participant_session(db, session_id, user)
-    response.headers["Cache-Control"] = "no-store"
+    return current, faculty
+
+
+def _snapshot(db, session_id, user, version):
+    current, faculty = _live_access(db, session_id, user)
     if current.status == "CLOSED":
         return {"status": current.status, "slide": None, "index": []}
     slide = db.get(LiveSlide, session_id)
@@ -319,6 +336,36 @@ def live_snapshot(session_id: str, response: Response, version: str = "", db: Se
     return {"status": current.status, "slide": snapshot, "index": index}
 
 
+@router.get("/sessions/{session_id}/live/document")
+def live_document(session_id: str, db: Session = Depends(session), user: User = Depends(actor)):
+    current = _faculty_session(db, session_id, user)
+    if current.status == "CLOSED":
+        raise HTTPException(409, "Class has ended")
+    material = db.get(Material, current.material_id)
+    if not material.filename.lower().endswith(".pdf"):
+        raise HTTPException(404, "No PDF for this lesson")
+    return _pdf_response(source_pdf(material))
+
+
+@router.get("/sessions/{session_id}/live/page/{version}")
+def live_page(session_id: str, version: str, db: Session = Depends(session), user: User = Depends(actor)):
+    current, _ = _live_access(db, session_id, user)
+    slide = db.get(LiveSlide, session_id)
+    if current.status == "CLOSED" or not slide or slide.version != version:
+        raise HTTPException(409, "This page is no longer being shared")
+    if not json.loads(slide.content).get("pdf"):
+        raise HTTPException(404, "No PDF for this page")
+    material = db.get(Material, current.material_id)
+    page = slide.page
+    return _pdf_response(page_pdf(material, page))
+
+
+def _pdf_response(content):
+    return Response(content, media_type="application/pdf",
+                    headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff",
+                             "Content-Disposition": 'attachment; filename="lesson.pdf"'})
+
+
 @router.put("/sessions/{session_id}/live")
 def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session), user: User = Depends(actor)):
     current = _faculty_session(db, session_id, user)
@@ -333,6 +380,7 @@ def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session
     db.merge(LiveSlide(session_id=session_id, page=data.page, total=total, version=uid(),
                        content=json.dumps(content, ensure_ascii=False)))
     db.commit()
+    notify(session_id)
     return {"page": data.page, "total": total}
 
 
@@ -373,6 +421,7 @@ def hide(row_id: str, db: Session = Depends(session), user: User = Depends(actor
         s.projected_id = None
     _audit(db, user.id, s.course_id, "session_question_hidden", s.material_id)
     db.commit()
+    notify(s.id)
     return {"id": row.id, "hidden": True}
 
 
@@ -381,6 +430,7 @@ def unhide(row_id: str, db: Session = Depends(session), user: User = Depends(act
     row, s = _faculty_row(db, row_id, user)
     row.hidden = False
     db.commit()
+    notify(s.id)
     return {"id": row.id, "hidden": False}
 
 
@@ -488,6 +538,7 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
         db.add(QuestionSlide(question_id=row.id, page=page))
     _audit(db, user.id, s.course_id, "session_question_coached", s.material_id, detail=str(coaching.get("mode")))
     db.commit()
+    notify(s.id)
     return {"id": row.id, "level": row.level, "coaching": _student_coaching(coaching)}
 
 
@@ -513,6 +564,7 @@ def session_revise(row_id: str, data: SessionRevise, db: Session = Depends(sessi
     row.latest_coaching_json = json.dumps(coaching, ensure_ascii=False)
     _audit(db, user.id, s.course_id, "session_question_revised", s.material_id)
     db.commit()
+    notify(s.id)
     return {"id": row.id, "level": row.level, "coaching": _student_coaching(coaching)}
 
 
@@ -526,6 +578,7 @@ def session_submit(row_id: str, db: Session = Depends(session), user: User = Dep
         row.submitted_at = now()
         _audit(db, user.id, s.course_id, "session_question_submitted", s.material_id)
         db.commit()
+        notify(s.id)
     return {"id": row.id, "submitted": True, "level": row.level, "text": row.latest_text,
             "original": _original_text(db, row)}
 
