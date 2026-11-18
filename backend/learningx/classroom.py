@@ -22,7 +22,7 @@ from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
@@ -95,6 +95,14 @@ class SlideConfusion(Base):
     y: Mapped[int | None] = mapped_column(Integer)
 
 
+class SlideConfusionArea(Base):
+    __tablename__ = "slide_confusion_areas"
+    session_id: Mapped[str] = mapped_column(ForeignKey("class_sessions.id"), primary_key=True)
+    page: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    rectangles: Mapped[str] = mapped_column(Text)
+
+
 class QuestionAnchor(Base):
     __tablename__ = "question_anchors"
     question_id: Mapped[str] = mapped_column(ForeignKey("session_questions.id"), primary_key=True)
@@ -119,10 +127,24 @@ class ShareSlide(BaseModel):
     page: int = Field(ge=1)
 
 
+class SlideRectangle(BaseModel):
+    left: float = Field(ge=0, le=1)
+    top: float = Field(ge=0, le=1)
+    right: float = Field(ge=0, le=1)
+    bottom: float = Field(ge=0, le=1)
+
+    @model_validator(mode="after")
+    def check_area(self):
+        if self.left >= self.right or self.top >= self.bottom:
+            raise ValueError("Selection rectangle must have a positive area")
+        return self
+
+
 class SlideAnchor(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
     quote: str = Field(default="", max_length=240)
+    rects: list[SlideRectangle] = Field(default_factory=list, max_length=16)
 
 
 class ConfusionRequest(BaseModel):
@@ -384,16 +406,19 @@ def _snapshot(db, session_id, user, version):
     confusion = None
     if slide:
         votes = db.query(SlideConfusion).filter_by(session_id=session_id, page=slide.page)
-        if faculty:
-            groups = votes.with_entities(SlideConfusion.x, SlideConfusion.y, func.count()).group_by(
-                SlideConfusion.x, SlideConfusion.y).all()
-            confusion = {"count": sum(count for _, _, count in groups), "spots": [
-                {"x": x / 20, "y": y / 20, "count": count} for x, y, count in groups if x is not None]}
-        else:
-            own = votes.filter_by(student_id=user.id).first()
-            if own:
-                confusion = {"mine": True, "spots": [] if own.x is None else [
-                    {"x": own.x / 20, "y": own.y / 20, "count": 1}]}
+        group_query = votes.outerjoin(SlideConfusionArea, (
+            (SlideConfusion.session_id == SlideConfusionArea.session_id)
+            & (SlideConfusion.page == SlideConfusionArea.page)
+            & (SlideConfusion.student_id == SlideConfusionArea.student_id)
+        )).with_entities(SlideConfusion.x, SlideConfusion.y, func.count(),
+                         func.min(SlideConfusionArea.rectangles)).group_by(SlideConfusion.x, SlideConfusion.y)
+        groups = (group_query if faculty else group_query.filter(SlideConfusion.student_id == user.id)).all()
+        if faculty or groups:
+            confusion = {"count": sum(count for _, _, count, _ in groups)} if faculty else {"mine": True}
+            confusion["spots"] = [
+                {"x": x / 20, "y": y / 20, "count": count, **({"rects": json.loads(rects)} if rects else {})}
+                for x, y, count, rects in groups if x is not None
+            ]
     snapshot = _slide_metadata(slide, version)
     if faculty and snapshot and snapshot.get("pdf"):
         snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
@@ -611,10 +636,17 @@ def flag_confusion(session_id: str, data: ConfusionRequest, db: Session = Depend
     anchor = data.anchor
     x = round(anchor.x * 20) if anchor else None
     y = round(anchor.y * 20) if anchor else None
-    vote = db.get(SlideConfusion, (session_id, data.page, user.id))
-    if vote and (vote.x, vote.y) == (x, y):
+    key = (session_id, data.page, user.id)
+    vote = db.get(SlideConfusion, key)
+    area = db.get(SlideConfusionArea, key)
+    rects = json.dumps([rect.model_dump() for rect in anchor.rects]) if anchor and anchor.rects else None
+    if vote and (vote.x, vote.y) == (x, y) and (area.rectangles if area else None) == rects:
         return {"page": data.page}
     db.merge(SlideConfusion(session_id=session_id, page=data.page, student_id=user.id, x=x, y=y))
+    if rects:
+        db.merge(SlideConfusionArea(session_id=session_id, page=data.page, student_id=user.id, rectangles=rects))
+    elif area:
+        db.delete(area)
     db.commit()
     notify(session_id)
     return {"page": data.page}
@@ -645,7 +677,7 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
         db.flush()
         db.add(QuestionSlide(question_id=row.id, page=page))
         if data.anchor:
-            db.add(QuestionAnchor(question_id=row.id, location=data.anchor.model_dump_json()))
+            db.add(QuestionAnchor(question_id=row.id, location=data.anchor.model_dump_json(exclude_unset=True)))
     _audit(db, user.id, s.course_id, "session_question_coached", s.material_id, detail=str(coaching.get("mode")))
     db.commit()
     notify(s.id)

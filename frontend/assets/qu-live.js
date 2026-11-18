@@ -115,7 +115,11 @@
       const hit = range.getBoundingClientRect();
       if (!area.width || !area.height) return;
       const clamp = value => Math.max(0, Math.min(1, value));
-      picked = {x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
+      const rects = [...range.getClientRects()].map(rect => ({
+        left: clamp((rect.left - area.left) / area.width), top: clamp((rect.top - area.top) / area.height),
+        right: clamp((rect.right - area.left) / area.width), bottom: clamp((rect.bottom - area.top) / area.height),
+      })).filter(rect => rect.right > rect.left && rect.bottom > rect.top).slice(0, 16);
+      picked = {rects, x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
         y: clamp((hit.top + hit.height / 2 - area.top) / area.height),
         quote: selection.toString().trim().slice(0, 240)};
       if (feedback) feedback.textContent = picked.quote ? '선택: “' + picked.quote + '”' : '';
@@ -171,11 +175,12 @@
       const key = JSON.stringify([displayed, visible, strip ? items.map(({id, level, page}) => [id, level, page]) : null]);
       if (key !== indexKey) {
         indexKey = key;
-        index.replaceChildren(...visible.map(item => el('button', {
+        index.replaceChildren(...visible.map((item, number) => el('button', {
           type: 'button', class: 'live-tab ' + item.level,
           'aria-label': LEVEL[item.level] + ' 질문: ' + (item.text || ''),
           onclick: () => onQuestion(item.id)
-        }, el('span', {class: 'live-tab-label', text: LEVEL[item.level]}),
+        }, el('span', {class: 'live-tab-label', text: (number + 1) + ' · ' + LEVEL[item.level]}),
+        el('span', {class: 'live-tab-number', text: number + 1, 'aria-hidden': 'true'}),
         el('span', {class: 'live-tab-preview'},
           item.anchor?.quote ? el('small', {text: '“' + item.anchor.quote + '”'}) : null,
           el('span', {text: item.text || LEVEL[item.level] + ' 질문'})))));
@@ -205,9 +210,17 @@
       frame.querySelector('.live-marks')?.remove();
       const layer = el('div', {class: 'live-marks', 'aria-hidden': 'true'});
       const pins = [...(current?.spots ?? []).map(spot => ({...spot, level: 'confused'})),
-        ...visible.filter(item => item.anchor).map(item => ({...item.anchor, level: item.level}))];
+        ...visible.map((item, number) => item.anchor ? {...item.anchor, level: item.level, count: number + 1} : null).filter(Boolean)];
       if (picked) pins.push({...picked, level: 'picked'});
       for (const pin of pins) {
+        for (const rect of pin.rects ?? []) {
+          const highlight = el('span', {class: 'live-highlight ' + pin.level});
+          highlight.style.left = (rect.left * 100) + '%';
+          highlight.style.top = (rect.top * 100) + '%';
+          highlight.style.width = ((rect.right - rect.left) * 100) + '%';
+          highlight.style.height = ((rect.bottom - rect.top) * 100) + '%';
+          layer.append(highlight);
+        }
         const marker = el('span', {class: 'live-mark ' + pin.level, text: pin.count ?? ''});
         marker.style.left = (pin.x * 100) + '%';
         marker.style.top = (pin.y * 100) + '%';
