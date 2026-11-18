@@ -221,3 +221,10 @@ button,input,textarea,select{font:inherit;color:inherit}
 .live-tab.deep {background: #13806a; color: #fff;}
 #share-page {width: 5rem;}
 #slide-share-form {flex-wrap: wrap;}
+.live-pdf {position: relative; margin: auto; max-width: 100%;}
+.live-pdf canvas {display: block; width: 100%; height: auto;}
+.live-pdf-text {position: absolute; inset: 0; overflow: hidden; line-height: 1; text-align: initial; text-size-adjust: none; transform-origin: 0 0; --min-font-size: 1; --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size)); --min-font-size-inv: calc(1 / var(--min-font-size));}
+.live-pdf-text :is(span, br) {color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%;}
+.live-pdf-text > :not(.markedContent), .live-pdf-text .markedContent span:not(.markedContent) {z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg; transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));}
+.live-pdf-text .markedContent {display: contents;}
+.live-pdf-text ::selection {color: transparent; background: #4b83e878;}

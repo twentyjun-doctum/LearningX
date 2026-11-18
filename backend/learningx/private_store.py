@@ -235,3 +235,30 @@ def store_after_ingest(folder: Path, course_id: str, material_id: str):
 def persist_approval(record, parsed: Path):
     if record.out_dir.startswith("s3://"):
         require_store().publish_signed(record, parsed)
+
+
+def read_material_artifact(record, name, limit):
+    """Read one verified immutable artifact without downloading the lesson bundle."""
+    name = _safe_name(name)
+    if record.out_dir.startswith("s3://"):
+        store = require_store()
+        prefix = store.parse_ref(record)
+        for item in store._manifest(prefix)["files"]:
+            if item["path"] != name:
+                continue
+            if item["size"] > limit:
+                raise HTTPException(413, "Artifact is too large")
+            raw = store._get(item["key"], item["size"])
+            if len(raw) != item["size"] or _sha(raw) != item["sha256"]:
+                raise HTTPException(503, "Private artifact integrity check failed")
+            return raw
+    else:
+        with material_workspace(record) as out:
+            path = out.parent / name if name.startswith("source.") else out / name.removeprefix("parsed/")
+            if path.is_file():
+                with path.open("rb") as handle:
+                    raw = handle.read(limit + 1)
+                if len(raw) > limit:
+                    raise HTTPException(413, "Artifact is too large")
+                return raw
+    raise HTTPException(404, "Artifact not found")

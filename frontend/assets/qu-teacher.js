@@ -389,11 +389,10 @@
     screen('live');
     $('share-page').value = '1';
     liveView = window.QU.createLiveView({
-      api, session: sessionId, panel: $('teacher-slide'),
-      onState: ({slide, status}) => {
-        if (slide) $('share-page').max = slide.total;
-        $('share-prev').disabled = !slide || slide.page <= 1;
-        $('share-next').disabled = Boolean(slide && slide.page >= slide.total);
+      api, session: sessionId, panel: $('teacher-slide'), faculty: true,
+      onState: ({slide, status, total}) => {
+        if (total || slide) $('share-page').max = total || slide.total;
+        if (slide && state.live?.lastRequestedPage === slide.page) state.live.lastRequestedPage = undefined;
         if (status === 'CLOSED') go(`end/${sessionId}`);
       },
       onQuestion: async (id) => {
@@ -412,16 +411,33 @@
   }
 
   async function broadcast(page) {
-    const button = $('slide-share-form').querySelector('[type=submit]');
-    if (button.disabled) return;
-    busy(button, true, '송출 중…');
+    const live = state.live;
+    const view = liveView;
+    if (!live || !view || !Number.isInteger(page) || page < 1 || page > (view.total() ?? Infinity)) return;
+    live.requestedPage = page;
+    live.lastRequestedPage = page;
+    $('share-page').value = String(page);
+    view.select(page);
+    if (live.sendingPage) return;
+    live.sendingPage = true;
     try {
-      await api(`/v1/sessions/${state.live.session.id}/live`, {method: 'PUT', body: {page}});
-      $('share-page').value = String(page);
-    } catch (err) {
-      setError($('global-error'), err.status === 422 ? '송출할 수 없는 페이지입니다.' : err);
+      while (live.requestedPage !== undefined && state.live === live && liveView === view) {
+        const next = live.requestedPage;
+        live.requestedPage = undefined;
+        try {
+          await api(`/v1/sessions/${live.session.id}/live`, {method: 'PUT', body: {page: next}});
+          setError($('global-error'), null);
+        } catch (err) {
+          if (state.live !== live || liveView !== view) return;
+          if (live.requestedPage === undefined) {
+            live.lastRequestedPage = undefined;
+            view.reconcile();
+          }
+          setError($('global-error'), err.status === 422 ? '송출할 수 없는 페이지입니다.' : err);
+        }
+      }
     } finally {
-      busy(button, false);
+      live.sendingPage = false;
     }
   }
 
@@ -429,11 +445,26 @@
     e.preventDefault();
     broadcast(Number($('share-page').value));
   });
-  $('share-prev').addEventListener('click', () => {
-    const page = liveView?.page();
-    if (page > 1) broadcast(page - 1);
+  function moveSlide(delta) {
+    const current = state.live?.lastRequestedPage ?? liveView?.target() ?? 0;
+    broadcast(current + delta);
+  }
+  $('share-prev').addEventListener('click', () => moveSlide(-1));
+  $('share-next').addEventListener('click', () => moveSlide(1));
+  $('teacher-slide').querySelector('[data-live-content]').addEventListener('click', e => {
+    if (e.button === 0 && !window.getSelection()?.toString() && !e.target.closest('button, a')) moveSlide(1);
   });
-  $('share-next').addEventListener('click', () => broadcast((liveView?.page() || 0) + 1));
+  document.addEventListener('keydown', e => {
+    if ($('teacher-slide').hidden || location.hash.split('/')[0] !== '#live' ||
+        document.fullscreenElement && document.fullscreenElement !== $('teacher-slide') ||
+        e.defaultPrevented || e.ctrlKey || e.altKey || e.metaKey || e.shiftKey ||
+        e.target.closest('input, textarea, select, button, a, [contenteditable]')) return;
+    const delta = ['ArrowRight', 'PageDown', ' '].includes(e.key) ? 1 :
+      ['ArrowLeft', 'PageUp'].includes(e.key) ? -1 : 0;
+    if (!delta) return;
+    e.preventDefault();
+    moveSlide(delta);
+  });
   $('share-fullscreen').addEventListener('click', async () => {
     try {
       if (document.fullscreenElement) await document.exitFullscreen();

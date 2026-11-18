@@ -1,4 +1,5 @@
 """Live classroom session flow (frozen engine mocked; ACL and anonymity are real)."""
+import json
 import os
 import tempfile
 import unittest
@@ -92,6 +93,48 @@ class ClassroomTests(unittest.TestCase):
         self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], [])
         self.req("PUT", path + "/state", self.tf, json={"status": "CLOSED"})
         self.assertIsNone(self.req("GET", path + "/live", first).json()["slide"])
+
+    def test_live_pdf_preserves_text_and_only_serves_the_shared_page(self):
+        import pymupdf
+
+        folder = Path(TEMP.name) / "selectable-pdf"
+        parsed = folder / "parsed"
+        parsed.mkdir(parents=True)
+        with pymupdf.open() as pdf:
+            for label in ["Visible slide text", "Unshared slide text"]:
+                pdf.new_page().insert_text((72, 72), label)
+            pdf.save(folder / "source.pdf")
+        (parsed / "document.json").write_text(json.dumps({"pages": [
+            {"page": 1, "blocks": []},
+            {"page": 2, "blocks": [], "hidden_slide": True},
+        ]}), encoding="utf-8")
+        with SessionLocal() as db:
+            db.get(Material, self.material_id).out_dir = str(parsed)
+            db.commit()
+        course = f"/v1/courses/{self.course_id}"
+        self.req("PUT", course + "/policy", self.tf,
+                 json={"policy": "RESTRICTED_HINT_ONLY", "teacher_approved": True})
+        with patch.object(nit, "verified_count", return_value=1):
+            opened = self.req("POST", course + "/sessions", self.tf,
+                              json={"material_id": self.material_id}).json()
+        student = self.req("POST", "/v1/join", json={"code": opened["join_code"]}).json()["access_token"]
+        path = f"/v1/sessions/{opened['id']}/live"
+        self.assertEqual(self.req("GET", path + "/document", student).status_code, 403)
+        self.assertEqual(self.req("GET", path + "/document", self.tf).status_code, 200)
+        self.assertEqual(self.req("PUT", path, self.tf, json={"page": 2}).status_code, 422)
+        before = self.req("GET", path, student).json()["revision"]
+        self.assertEqual(self.req("PUT", path, self.tf, json={"page": 1}).status_code, 200)
+        state = self.req("GET", path, student, params={"after": before}).json()
+        self.assertNotEqual(state["revision"], before)
+        self.assertTrue(state["slide"]["pdf"])
+        page = path + "/page/" + state["slide"]["version"]
+        self.assertEqual(self.req("GET", page, self.to).status_code, 403)
+        response = self.req("GET", page, student)
+        self.assertEqual(response.status_code, 200)
+        with pymupdf.open(stream=response.content, filetype="pdf") as pdf:
+            self.assertEqual(len(pdf), 1)
+            self.assertEqual(pdf[0].get_text().strip(), "Visible slide text")
+        self.assertEqual(self.req("GET", path + "/page/stale", student).status_code, 409)
 
     def test_full_flow(self):
         cid, mid = self.course_id, self.material_id
