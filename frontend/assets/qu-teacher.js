@@ -1,6 +1,6 @@
 /* Question-up · 교수자 흐름
-   초대 → 내 수업 → 교안 올리기 → 검토·승인 → 수업 중 보드 → 화면에 띄우기 → 종료·CSV
-   토큰은 메모리에만 둡니다. 새로고침하면 다시 초대 코드를 입력합니다. */
+   체험 시작 → 내 수업 → 교안 올리기 → 검토·승인 → 수업 중 보드 → 화면에 띄우기 → 종료·CSV
+   토큰은 메모리에만 둡니다. 새로고침하면 현재 체험 수업 관리 세션이 종료됩니다. */
 (() => {
   'use strict';
   const { el, client, LEVEL, relTime } = window.QU;
@@ -92,27 +92,21 @@
     if (token) return go('courses');
     header({});
     screen('login');
-    $('invite').focus();
+    $('guest-start').focus();
   }
 
-  $('login-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const code = $('invite').value.trim();
-    const btn = e.submitter || e.target.querySelector('button');
+  $('guest-start').addEventListener('click', async () => {
+    const button = $('guest-start');
     setError($('login-error'), null);
-    if (!/^[A-Za-z0-9_-]{43}$/.test(code)) {
-      return setError($('login-error'), '초대 코드 형식이 올바르지 않습니다. 받은 코드를 그대로 붙여 넣어 주세요.');
-    }
-    busy(btn, true, '확인 중…');
+    busy(button, true, '준비 중…');
     try {
-      const res = await api('/v1/beta/faculty/session', { method: 'POST', body: { code } });
-      token = res.access_token;
-      $('invite').value = '';
-      go('courses');
+      const result = await api('/v1/faculty/guest', { method: 'POST', body: {} });
+      token = result.access_token;
+      go('upload');
     } catch (err) {
-      setError($('login-error'), err.status === 401 ? '초대 코드를 확인할 수 없습니다.' : err);
+      setError($('login-error'), err.status === 429 ? '오늘 열 수 있는 체험 수업이 모두 사용됐습니다.' : err);
     } finally {
-      busy(btn, false);
+      busy(button, false);
     }
   });
 
@@ -261,7 +255,7 @@
     if (!u.courseId && title.length < 2) return setError($('upload-error'), '수업 이름을 2자 이상 입력해 주세요.');
     if (!file) return setError($('upload-error'), '올릴 교안 파일을 골라 주세요.');
     if (!/\.(pdf|pptx)$/i.test(file.name)) return setError($('upload-error'), 'PDF 또는 PPTX 파일만 올릴 수 있습니다.');
-    if (file.size > 100 * 1024 * 1024) return setError($('upload-error'), '100MB 이하 파일만 올릴 수 있습니다.');
+    if (file.size > 40 * 1024 * 1024) return setError($('upload-error'), '40MB 이하 파일만 올릴 수 있습니다.');
     if (!$('upload-rights').checked) return setError($('upload-error'), '업로드 권한을 확인해 주세요.');
 
     busy(btn, true, '올리는 중…');

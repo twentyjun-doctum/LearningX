@@ -33,7 +33,7 @@ const entry=fs.readFileSync(path.join(root,'index.html'),'utf8');
 for(const id of ['join-code'])assert.match(entry,new RegExp(`id="${id}"`));
 assert.match(entry,/teacher\.html/);
 const teacher=fs.readFileSync(path.join(root,'teacher.html'),'utf8');
-for(const id of ['login-form','course-list','upload-form','candidate-list','ai-consent','approve-start','board','level-filter','projector','export-csv'])assert.match(teacher,new RegExp(`id="${id}"`));
+for(const id of ['guest-start','course-list','upload-form','candidate-list','ai-consent','approve-start','board','level-filter','projector','export-csv'])assert.match(teacher,new RegExp(`id="${id}"`));
 const student=fs.readFileSync(path.join(root,'student.html'),'utf8');
 for(const id of ['join-form','thread','composer','send-now','screen-sent','mine-list'])assert.match(student,new RegExp(`id="${id}"`));
 for(const html of [entry,teacher,student]){
@@ -49,7 +49,7 @@ for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu
 const quApi=fs.readFileSync(path.join(root,'assets/qu-api.js'),'utf8');
 assert.match(quApi,/credentials: 'omit'/);
 const quTeacher=fs.readFileSync(path.join(root,'assets/qu-teacher.js'),'utf8');
-for(const ep of ['/v1/beta/faculty/session','/uploads/initiate','/candidates','/approve','/policy','/sessions','/board','/project','/export'])assert.ok(quTeacher.includes(ep),`teacher flow calls ${ep}`);
+for(const ep of ['/v1/faculty/guest','/uploads/initiate','/candidates','/approve','/policy','/sessions','/board','/project','/export'])assert.ok(quTeacher.includes(ep),`teacher flow calls ${ep}`);
 const quStudent=fs.readFileSync(path.join(root,'assets/qu-student.js'),'utf8');
 for(const ep of ['/v1/join','/questions','/revisions','/submit','/mine'])assert.ok(quStudent.includes(ep),`student flow calls ${ep}`);
 console.log(`OK: ${pages.length} linked HTML pages, app + Question-up contract hooks, token hygiene, CSP hygiene, Vercel headers`);

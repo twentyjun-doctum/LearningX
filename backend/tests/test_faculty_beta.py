@@ -18,6 +18,12 @@ from test_store import FakeS3
 
 class FacultyBetaTests(unittest.TestCase):
     def test_upload_and_signed_review(self):
+        self._check_upload_and_review(guest=False)
+
+    def test_guest_classroom_with_real_parser(self):
+        self._check_upload_and_review(guest=True)
+
+    def _check_upload_and_review(self, guest):
         with fitz.open() as pdf:
             cover = pdf.new_page()
             cover.insert_text((72, 85), "Media Literacy", fontsize=22)
@@ -45,7 +51,7 @@ class FacultyBetaTests(unittest.TestCase):
         }
         with TestClient(app) as client, patch.dict(os.environ, env):
             with SessionLocal() as db:
-                faculty = User(email="beta-faculty@test.local", role="faculty")
+                faculty = User(email=f"beta-faculty-{guest}@test.local", role="faculty")
                 db.add(faculty)
                 db.flush()
                 faculty_id = faculty.id
@@ -57,10 +63,18 @@ class FacultyBetaTests(unittest.TestCase):
             with patch.dict(os.environ, {"NIT_BETA_FACULTY_INVITES": invites}), patch.object(
                 private_store, "PrivateArtifactStore", return_value=store
             ):
-                endpoint = "/v1/beta/faculty/session"
-                assert client.post(endpoint, json={"code": secrets.token_urlsafe(32)}).status_code == 401
-                session = client.post(endpoint, json={"code": code})
-                assert session.status_code == 200, session.text
+                if guest:
+                    endpoint = "/v1/faculty/guest"
+                    origin = "https://learning-x-one.vercel.app"
+                    with patch.dict(os.environ, {"NIT_CORS_ORIGINS": origin}):
+                        assert client.post(endpoint, json={}).status_code == 403
+                        session = client.post(endpoint, json={}, headers={"Origin": origin})
+                    assert session.status_code == 201, session.text
+                else:
+                    endpoint = "/v1/beta/faculty/session"
+                    assert client.post(endpoint, json={"code": secrets.token_urlsafe(32)}).status_code == 401
+                    session = client.post(endpoint, json={"code": code})
+                    assert session.status_code == 200, session.text
                 assert session.headers["Cache-Control"] == "no-store"
                 headers = {"Authorization": "Bearer " + session.json()["access_token"]}
                 course = client.post("/v1/courses", json={"title": "Media Literacy"}, headers=headers)
@@ -98,3 +112,13 @@ class FacultyBetaTests(unittest.TestCase):
                 assert approved.json()["approved_count"] == 1
                 with SessionLocal() as db, store.workspace(db.get(Material, material_id)) as parsed:
                     assert engine_adapter.verified_count(parsed) == 1
+                if guest:
+                    policy = client.put(f"/v1/courses/{course_id}/policy", headers=headers,
+                                        json={"policy": "RESTRICTED_HINT_ONLY", "teacher_approved": True})
+                    assert policy.status_code == 200
+                    opened = client.post(f"/v1/courses/{course_id}/sessions", headers=headers,
+                                         json={"material_id": material_id})
+                    assert opened.status_code == 201, opened.text
+                    code = opened.json()["join_code"]
+                    assert len(code) == 6
+                    assert client.post("/v1/join", json={"code": code}).status_code == 200
