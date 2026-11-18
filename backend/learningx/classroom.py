@@ -357,6 +357,13 @@ def projected(session_id: str, db: Session = Depends(session), user: User = Depe
             "item": _board_item(db, row) if row else None, "next_id": nxt}
 
 
+def _csv_cell(text):
+    # Spreadsheet applications evaluate leading formulas even in quoted CSV cells.
+    if text.startswith(("\t", "\r", "\n")) or text.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
 @router.get("/sessions/{session_id}/export")
 def export(session_id: str, db: Session = Depends(session), user: User = Depends(actor)):
     s = _faculty_session(db, session_id, user)
@@ -367,8 +374,8 @@ def export(session_id: str, db: Session = Depends(session), user: User = Depends
     w.writerow(["제출 시각", "질문 수준", "처음 질문", "다시 쓴 질문", "화면에 띄움"])
     for r in rows:
         original = _original_text(db, r)
-        w.writerow([_iso(r.submitted_at), LEVEL_LABEL[r.level], original,
-                    r.latest_text if r.latest_text != original else "",
+        w.writerow([_iso(r.submitted_at), LEVEL_LABEL[r.level], _csv_cell(original),
+                    _csv_cell(r.latest_text) if r.latest_text != original else "",
                     "예" if r.projected_at else ""])
     _audit(db, user.id, s.course_id, "session_exported", s.material_id)
     db.commit()
@@ -398,7 +405,7 @@ def join(data: JoinRequest, request: Request, response: Response, db: Session = 
     _audit(db, student.id, s.course_id, "student_joined_anonymously", s.material_id)
     db.commit()
     response.headers["Cache-Control"] = "no-store"
-    return {"access_token": issue_token(student.id, minutes=STUDENT_TOKEN_MINUTES),
+    return {"access_token": issue_token(student.id, minutes=STUDENT_TOKEN_MINUTES, session_id=s.id),
             "session": _public_session(db, s)}
 
 
@@ -449,8 +456,8 @@ def session_revise(row_id: str, data: SessionRevise, db: Session = Depends(sessi
 @router.post("/session-questions/{row_id}/submit")
 def session_submit(row_id: str, db: Session = Depends(session), user: User = Depends(actor)):
     row, s = _own_row(db, row_id, user)
-    if s.status == "CLOSED":
-        raise HTTPException(423, "The class has ended")
+    if s.status != "OPEN":
+        raise HTTPException(423, "The class is not taking questions right now")
     if not row.submitted:
         row.submitted = True
         row.submitted_at = now()

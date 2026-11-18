@@ -31,11 +31,13 @@ class ClassroomTests(unittest.TestCase):
     def setUpClass(cls):
         cls.client = TestClient(app)
         cls.client.__enter__()
+
+    def setUp(self):
         out = Path(TEMP.name) / "private" / "mat"
         out.mkdir(parents=True, exist_ok=True)
         with SessionLocal() as db:
-            fac = User(email="cls-faculty@test.local", role="faculty")
-            other = User(email="cls-other@test.local", role="faculty")
+            fac = User(email=f"cls-faculty-{self._testMethodName}@test.local", role="faculty")
+            other = User(email=f"cls-other-{self._testMethodName}@test.local", role="faculty")
             db.add_all([fac, other])
             db.flush()
             course = Course(title="의제설정 이론", policy="RESTRICTED_HINT_ONLY", teacher_approved=False, created_by=fac.id)
@@ -45,9 +47,9 @@ class ClassroomTests(unittest.TestCase):
             mat = Material(course_id=course.id, filename="lesson.pdf", sha256="a" * 64, out_dir=str(out), ingested_by=fac.id)
             db.add(mat)
             db.commit()
-            cls.fac_id, cls.other_id, cls.course_id, cls.material_id = fac.id, other.id, course.id, mat.id
-        cls.tf = issue_token(cls.fac_id)
-        cls.to = issue_token(cls.other_id)
+            self.fac_id, self.other_id, self.course_id, self.material_id = fac.id, other.id, course.id, mat.id
+        self.tf = issue_token(self.fac_id)
+        self.to = issue_token(self.other_id)
 
     @classmethod
     def tearDownClass(cls):
@@ -173,6 +175,60 @@ class ClassroomTests(unittest.TestCase):
         # Underlying question rows exist for the existing audit trail.
         with SessionLocal() as db:
             self.assertEqual(db.query(Question).filter_by(course_id=cid).count(), 2)
+
+    def _open_for_security_test(self):
+        self.req("PUT", f"/v1/courses/{self.course_id}/policy", self.tf,
+                 json={"policy": "RESTRICTED_HINT_ONLY", "teacher_approved": True})
+        with patch.object(nit, "verified_count", return_value=1):
+            opened = self.req("POST", f"/v1/courses/{self.course_id}/sessions", self.tf,
+                              json={"material_id": self.material_id})
+        self.assertEqual(opened.status_code, 201, opened.text)
+        session = opened.json()
+        joined = self.req("POST", "/v1/join", json={"code": session["join_code"]})
+        self.assertEqual(joined.status_code, 200, joined.text)
+        return session["id"], joined.json()["access_token"]
+
+    def test_scoped_tokens_block_legacy_routes_and_pause_submission(self):
+        sid, token = self._open_for_security_test()
+        with patch.object(nit, "coach_question", return_value=coaching("clarify")):
+            created = self.req("POST", f"/v1/sessions/{sid}/questions", token,
+                               json={"question": "의제설정의 의미는 무엇인가요?"})
+        self.assertEqual(created.status_code, 201, created.text)
+        rid = created.json()["id"]
+        self.req("PUT", f"/v1/sessions/{sid}/state", self.tf, json={"status": "PAUSED"})
+        self.assertEqual(self.req("POST", f"/v1/session-questions/{rid}/submit", token).status_code, 423)
+        self.req("PUT", f"/v1/sessions/{sid}/state", self.tf, json={"status": "CLOSED"})
+        self.assertEqual(self.req("GET", f"/v1/sessions/{sid}/mine", token).status_code, 200)
+        with patch.object(nit, "coach_question") as provider:
+            legacy = self.req("POST", f"/v1/courses/{self.course_id}/questions", token,
+                              json={"material_id": self.material_id, "question": "종료 후 새 질문을 작성할 수 있나요?"})
+            self.assertEqual(legacy.status_code, 403)
+            provider.assert_not_called()
+        self.assertEqual(self.req("GET", f"/v1/courses/{self.course_id}/materials", token).status_code, 403)
+        self.assertEqual(self.req("GET", "/v1/courses/mine", token).status_code, 403)
+        # Anonymous accounts cannot receive unscoped tokens as a fallback.
+        import jwt
+        claims = jwt.decode(token, options={"verify_signature": False})
+        unscoped = issue_token(claims["sub"])
+        self.assertEqual(self.req("GET", f"/v1/sessions/{sid}/mine", unscoped).status_code, 403)
+        second, _ = self._open_for_security_test()
+        self.assertEqual(self.req("GET", f"/v1/sessions/{second}", token).status_code, 403)
+        # A token bound to a session is still insufficient without DB participation.
+        wrong_participant = issue_token(claims["sub"], session_id=second)
+        self.assertEqual(self.req("GET", f"/v1/sessions/{second}", wrong_participant).status_code, 403)
+
+    def test_csv_question_cells_are_not_formulas(self):
+        sid, token = self._open_for_security_test()
+        import csv, io
+        for text in ("=1+1+1", "+SUM(1,2)", "-1+2+3", "@SUM(1,2)", "  =1+1+1", "\t=1+1+1"):
+            with patch.object(nit, "coach_question", return_value=coaching("clarify")):
+                row = self.req("POST", f"/v1/sessions/{sid}/questions", token, json={"question": text})
+            self.assertEqual(row.status_code, 201, row.text)
+            self.req("POST", f"/v1/session-questions/{row.json()['id']}/submit", token)
+        exported = self.req("GET", f"/v1/sessions/{sid}/export", self.tf)
+        cells = list(csv.reader(io.StringIO(exported.content.decode("utf-8-sig"))))[1:]
+        self.assertEqual(len(cells), 6)
+        self.assertTrue(all(row[2].startswith("'") for row in cells))
 
     def test_join_throttle(self):
         classroom._FAILED_JOINS.clear()

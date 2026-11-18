@@ -4,9 +4,18 @@
   const DEFAULT_API = 'https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run';
 
   function apiBase() {
+    // Production accepts only the reviewed shared API. Local overrides require a
+    // local frontend as well, so a crafted public URL cannot collect invite codes.
     const fromQuery = new URLSearchParams(location.search).get('api');
-    if (fromQuery && /^https:\/\/[^\s/]+|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(fromQuery)) {
-      return fromQuery.replace(/\/+$/, '');
+    if (fromQuery) {
+      try {
+        const parsed = new URL(fromQuery);
+        const local = ['localhost', '127.0.0.1'];
+        if (parsed.origin === DEFAULT_API && parsed.pathname === '/' && !parsed.search && !parsed.hash && !parsed.username && !parsed.password) return DEFAULT_API;
+        if (local.includes(location.hostname) && local.includes(parsed.hostname) &&
+            ['http:', 'https:'].includes(parsed.protocol) && parsed.pathname === '/' &&
+            !parsed.search && !parsed.hash && !parsed.username && !parsed.password) return parsed.origin;
+      } catch (_) { /* Invalid override: use the reviewed shared API. */ }
     }
     return DEFAULT_API;
   }

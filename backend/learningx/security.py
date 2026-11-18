@@ -2,7 +2,7 @@
 import os
 from datetime import datetime, timedelta, timezone
 import jwt
-from fastapi import HTTPException, Depends
+from fastapi import HTTPException, Depends, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
 from .storage import SessionLocal, User, Member
@@ -18,12 +18,15 @@ def session():
     with SessionLocal() as db:
         yield db
 
-def issue_token(user_id:str, minutes:int=60):
+def issue_token(user_id:str, minutes:int=60, *, session_id:str|None=None):
     now=datetime.now(timezone.utc)
-    return jwt.encode({"sub":user_id,"aud":"learningx","iss":"learningx-server",
-        "iat":now,"exp":now+timedelta(minutes=minutes)},secret(),algorithm="HS256")
+    claims={"sub":user_id,"aud":"learningx","iss":"learningx-server",
+        "iat":now,"exp":now+timedelta(minutes=minutes)}
+    if session_id:
+        claims.update(scope="classroom",session_id=session_id)
+    return jwt.encode(claims,secret(),algorithm="HS256")
 
-def actor(credentials:HTTPAuthorizationCredentials=Depends(scheme), db:Session=Depends(session)):
+def actor(request:Request, credentials:HTTPAuthorizationCredentials=Depends(scheme), db:Session=Depends(session)):
     if credentials is None:
         raise HTTPException(401,"Authentication required")
     try:
@@ -33,6 +36,7 @@ def actor(credentials:HTTPAuthorizationCredentials=Depends(scheme), db:Session=D
     user=db.get(User,p["sub"])
     if user is None or not user.active:
         raise HTTPException(401,"Inactive or unknown user")
+    _restrict_classroom_actor(request,p,db,user)
     return user
 
 def require_course(db:Session, course_id:str, user:User, required:str):
@@ -41,3 +45,41 @@ def require_course(db:Session, course_id:str, user:User, required:str):
     if not m or (m.role!=required and user.role!="admin"):
         raise HTTPException(403,"Course access denied")
     return m
+
+
+def _restrict_classroom_actor(request, claims, db, user):
+    """Anonymous join grants access to one live session, never course APIs."""
+    scope = claims.get("scope")
+    anonymous = user.email.endswith("@join.question-up.local")
+    if scope is None and not anonymous:
+        return
+    if scope != "classroom" or not claims.get("session_id"):
+        raise HTTPException(403,"Session-scoped authentication required")
+    route = getattr(request.scope.get("route"), "path", "")
+    allowed = {
+        ("GET", "/v1/sessions/{session_id}"),
+        ("GET", "/v1/sessions/{session_id}/mine"),
+        ("POST", "/v1/sessions/{session_id}/questions"),
+        ("POST", "/v1/session-questions/{row_id}/revisions"),
+        ("POST", "/v1/session-questions/{row_id}/submit"),
+    }
+    if (request.method,route) not in allowed:
+        raise HTTPException(403,"Session token cannot access this endpoint")
+    # Imported lazily after router initialization to avoid a module import cycle.
+    from .classroom import ClassSession, SessionParticipant, SessionQuestion
+    bound = claims["session_id"]
+    target = request.path_params.get("session_id")
+    if "row_id" in request.path_params:
+        row = db.get(SessionQuestion,request.path_params["row_id"])
+        if not row or row.student_id != user.id:
+            raise HTTPException(404,"Question not found")
+        target = row.session_id
+    if target != bound:
+        raise HTTPException(403,"Token belongs to a different session")
+    if not db.query(SessionParticipant).filter_by(session_id=bound,user_id=user.id).first():
+        raise HTTPException(403,"Not a participant of this session")
+    current = db.get(ClassSession,bound)
+    if not current:
+        raise HTTPException(404,"Session not found")
+    if request.method == "POST" and current.status != "OPEN":
+        raise HTTPException(423,"The class is not taking questions right now")

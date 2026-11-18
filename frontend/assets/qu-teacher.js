@@ -6,6 +6,7 @@
   const { el, client, LEVEL, relTime } = window.QU;
   const $ = (id) => document.getElementById(id);
 
+  const MAX_APPROVAL_ITEMS = 1000;
   let token = null;
   const state = {
     courses: [],          // [{...course, materials, openSession}]
@@ -337,16 +338,17 @@
     $('cand-selected').textContent = String(items.length);
     $('bar-count').textContent = items.length ? `${pages}쪽 ${items.length}개 내용` : p.approved ? `승인된 ${p.approved}개 내용` : '0개 내용';
     const all = $('candidate-list').querySelectorAll('input[type=checkbox]');
-    $('select-all').textContent = all.length && items.length === all.length ? '모두 해제' : '모두 선택';
+    $('select-all').textContent = items.length === Math.min(all.length, MAX_APPROVAL_ITEMS) && items.length ? '선택 해제' : all.length > MAX_APPROVAL_ITEMS ? '최대 1,000개 선택' : '모두 선택';
     $('select-all').disabled = !all.length;
     $('approve-start').textContent = items.length ? '승인하고 수업 시작' : '수업 시작';
-    $('approve-start').disabled = !items.length && !p.approved;
+    $('approve-start').disabled = items.length > MAX_APPROVAL_ITEMS || (!items.length && !p.approved);
+    if (items.length > MAX_APPROVAL_ITEMS) $('bar-count').textContent = '한 번에 최대 1,000개까지 승인할 수 있습니다.';
   }
 
   $('select-all').addEventListener('click', () => {
     const boxes = [...$('candidate-list').querySelectorAll('input[type=checkbox]')];
-    const on = !boxes.every((b) => b.checked);
-    boxes.forEach((b) => { b.checked = on; });
+    const on = !boxes.slice(0, MAX_APPROVAL_ITEMS).every((b) => b.checked);
+    boxes.forEach((b, index) => { b.checked = on && index < MAX_APPROVAL_ITEMS; });
     updateSelection();
   });
 
@@ -355,6 +357,7 @@
     const btn = $('approve-start');
     setError($('prepare-error'), null);
     const items = selectedItems();
+    if (items.length > MAX_APPROVAL_ITEMS) return setError($('prepare-error'), '한 번에 최대 1,000개까지 승인할 수 있습니다.');
     if (!$('ai-consent').checked) return setError($('prepare-error'), 'AI 질문 코칭 사용에 동의해야 수업을 시작할 수 있습니다.');
     if (items.length && p.isPptx && !$('media-ack').checked) return setError($('prepare-error'), '분석되지 않은 오디오·도표 안내를 확인해 주세요.');
     busy(btn, true, '시작하는 중…');

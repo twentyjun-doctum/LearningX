@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import vm from 'node:vm';
 const root=path.resolve(import.meta.dirname,'..');
 const pages=['index.html','intro.html','teacher.html','student.html','why.html','cards.html','flow.html','levels.html','principles.html','app.html'];
 for(const page of pages){
@@ -52,3 +53,23 @@ for(const ep of ['/v1/beta/faculty/session','/uploads/initiate','/candidates','/
 const quStudent=fs.readFileSync(path.join(root,'assets/qu-student.js'),'utf8');
 for(const ep of ['/v1/join','/questions','/revisions','/submit','/mine'])assert.ok(quStudent.includes(ep),`student flow calls ${ep}`);
 console.log(`OK: ${pages.length} linked HTML pages, app + Question-up contract hooks, token hygiene, CSP hygiene, Vercel headers`);
+
+// Exercise the actual request client without network: a shared link must never
+// redirect the faculty invite code or bearer token to another API origin.
+for (const [hostname, query, expected] of [
+ ['learning-x-one.vercel.app','https://outside.example','https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run'],
+ ['learning-x-one.vercel.app','http://localhost:8000','https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run'],
+ ['localhost','http://localhost:8000','http://localhost:8000'],
+ ['localhost','http://localhost.evil.example:8000','https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run'],
+ ['localhost','https://user:password@localhost:8000','https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run'],
+ ['learning-x-one.vercel.app','https://outside.example/path','https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run'],
+]) {
+ const calls=[];
+ const ctx=vm.createContext({window:{},location:{hostname,search:'?api='+encodeURIComponent(query)},URL,URLSearchParams,AbortController,setTimeout,clearTimeout,
+  fetch:async(url,options)=>{calls.push({url,options});return {ok:true,json:async()=>({ok:true})};}});
+ vm.runInContext(quApi,ctx);
+ await ctx.window.QU.client(()=> 'test-only-token')('/v1/beta/faculty/session',{method:'POST',body:{code:'test-only-code'}});
+ assert.equal(calls[0].url,expected+'/v1/beta/faculty/session');
+ assert.equal(calls[0].options.headers.Authorization,'Bearer test-only-token');
+}
+console.log('OK: API origin confinement protects invite codes and tokens');
