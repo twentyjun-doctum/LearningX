@@ -48,7 +48,7 @@
   // authentication and network I/O with module loading.
   warmPdf().catch(() => {});
 
-  window.QU.createLiveView = ({api, session, panel, faculty = false, initial, localFile, onState, onQuestion}) => {
+  window.QU.createLiveView = ({api, session, panel, faculty = false, initial, localFile, onState, onQuestion, onAnchor}) => {
     const page = panel.querySelector('[data-live-page]');
     const content = panel.querySelector('[data-live-content]');
     const index = panel.querySelector('[data-live-index]');
@@ -69,8 +69,11 @@
     let timer;
     let indexKey = '';
     let stamp;
+    let indexVersion;
     let items = initial?.index ?? [];
     let renderId = 0;
+    let activeRender = null;
+    let retryAfter = 0;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -91,16 +94,126 @@
     const width = () => Math.max(1, Math.floor(content.clientWidth || panel.clientWidth || 320));
     const height = () => Math.floor(document.fullscreenElement === panel ? innerHeight : innerHeight * .75);
 
+    const feedback = panel.querySelector('[data-live-feedback]');
+    const confusedButton = panel.querySelector('[data-live-confused]');
+    const askButton = panel.querySelector('[data-live-ask]');
+    const confusionSummary = panel.querySelector('[data-live-confusion]');
+    const strip = panel.querySelector('[data-live-strip]');
+    let confusion;
+    let picked;
+    let marksKey = '';
+    let open = initial?.status === 'OPEN';
+    let sendingConfusion = false;
+
+    function pickText() {
+      const selection = window.getSelection();
+      const frame = content.querySelector('.live-pdf');
+      if (!selection || selection.isCollapsed || !selection.rangeCount || !frame) return;
+      const range = selection.getRangeAt(0);
+      if (!frame.contains(range.startContainer) || !frame.contains(range.endContainer)) return;
+      const area = frame.getBoundingClientRect();
+      const hit = range.getBoundingClientRect();
+      if (!area.width || !area.height) return;
+      const clamp = value => Math.max(0, Math.min(1, value));
+      picked = {x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
+        y: clamp((hit.top + hit.height / 2 - area.top) / area.height),
+        quote: selection.toString().trim().slice(0, 240)};
+      if (feedback) feedback.textContent = picked.quote ? '선택: “' + picked.quote + '”' : '';
+      paintIndex();
+    }
+
+    function pickPoint(event) {
+      if (window.getSelection()?.toString().trim()) return;
+      const frame = event.target.closest('.live-pdf');
+      if (!frame) return;
+      const area = frame.getBoundingClientRect();
+      picked = {x: (event.clientX - area.left) / area.width, y: (event.clientY - area.top) / area.height};
+      if (picked.x < 0 || picked.x > 1 || picked.y < 0 || picked.y > 1) {
+        picked = null;
+        return;
+      }
+      feedback.textContent = '교안에서 위치를 선택했어요.';
+      paintIndex();
+    }
+
+    function sendConfusion() {
+      pickText();
+      const target = displayed;
+      if (!target || !open || sendingConfusion) return;
+      sendingConfusion = true;
+      confusedButton.disabled = true;
+      api(path + '/confusion', {method: 'PUT', body: {page: target, anchor: picked}}).then(() => {
+        if (displayed === target) feedback.textContent = '헷갈리는 부분을 전달했어요.';
+      }).catch(err => {
+        if (displayed === target) feedback.textContent = err.status === 409 ? '페이지가 바뀌었어요. 다시 선택해 주세요.' : err.message;
+      }).finally(() => { sendingConfusion = false; confusedButton.disabled = !open || !displayed; });
+    }
+
+    function askHere() {
+      pickText();
+      if (!displayed || !open) return;
+      if (!onAnchor?.({page: displayed, anchor: picked})) {
+        feedback.textContent = '지금 작성 중인 질문을 먼저 마무리해 주세요.';
+        return;
+      }
+      feedback.textContent = displayed + '쪽에 질문을 붙여요.';
+    }
+
+    if (!faculty) {
+      document.addEventListener('selectionchange', pickText);
+      content.addEventListener('click', pickPoint);
+      confusedButton?.addEventListener('click', sendConfusion);
+      askButton?.addEventListener('click', askHere);
+    }
+
     function paintIndex() {
       const visible = items.filter(item => item.page === displayed);
-      const key = JSON.stringify(visible);
-      if (key === indexKey) return;
-      indexKey = key;
-      index.replaceChildren(...visible.map(item => el('button', {
-        type: 'button', class: 'live-tab ' + item.level,
-        'aria-label': LEVEL[item.level] + ' 질문', title: LEVEL[item.level] + ' 질문',
-        onclick: () => onQuestion(item.id)
-      }, LEVEL[item.level])));
+      const key = JSON.stringify([displayed, visible, strip ? items.map(({id, level, page}) => [id, level, page]) : null]);
+      if (key !== indexKey) {
+        indexKey = key;
+        index.replaceChildren(...visible.map(item => el('button', {
+          type: 'button', class: 'live-tab ' + item.level,
+          'aria-label': LEVEL[item.level] + ' 질문: ' + (item.text || ''),
+          onclick: () => onQuestion(item.id)
+        }, el('span', {class: 'live-tab-label', text: LEVEL[item.level]}),
+        el('span', {class: 'live-tab-preview'},
+          item.anchor?.quote ? el('small', {text: '“' + item.anchor.quote + '”'}) : null,
+          el('span', {text: item.text || LEVEL[item.level] + ' 질문'})))));
+        if (strip) {
+          const groups = new Map();
+          for (const item of items) {
+            if (!groups.has(item.page)) groups.set(item.page, []);
+            groups.get(item.page).push(item);
+          }
+          strip.replaceChildren(...Array.from(groups).sort(([a], [b]) => a - b).map(([number, questions]) =>
+            el('div', {class: 'live-strip-page'}, el('span', {text: number + '쪽'}),
+              ...questions.map(item => el('button', {type: 'button', class: 'live-tab ' + item.level,
+                'aria-label': number + '쪽 ' + LEVEL[item.level] + ' 질문', onclick: () => onQuestion(item.id)})))));
+        }
+      }
+      const current = displayed === slide?.page ? confusion : null;
+      const markState = JSON.stringify([displayed, current, picked, visible.map(item => [item.id, item.level, item.anchor])]);
+      const frame = content.querySelector('.live-pdf');
+      if (confusionSummary) confusionSummary.textContent = displayed ? '헷갈려요 · ' + (current?.count ?? 0) + '명' : '';
+      if (confusedButton) {
+        confusedButton.textContent = current?.mine ? '여기가 헷갈려요 ✓' : '여기가 헷갈려요';
+        confusedButton.disabled = !displayed || !open || sendingConfusion;
+        askButton.disabled = !displayed || !open;
+      }
+      if (!frame || markState === marksKey) return;
+      marksKey = markState;
+      frame.querySelector('.live-marks')?.remove();
+      const layer = el('div', {class: 'live-marks', 'aria-hidden': 'true'});
+      const pins = [...(current?.spots ?? []).map(spot => ({...spot, level: 'confused'})),
+        ...visible.filter(item => item.anchor).map(item => ({...item.anchor, level: item.level}))];
+      if (picked) pins.push({...picked, level: 'picked'});
+      for (const pin of pins) {
+        const marker = el('span', {class: 'live-mark ' + pin.level, text: pin.count ?? ''});
+        marker.style.left = (pin.x * 100) + '%';
+        marker.style.top = (pin.y * 100) + '%';
+        layer.append(marker);
+      }
+      frame.append(layer);
     }
 
     function pageBytes(target, number) {
@@ -110,7 +223,8 @@
         pageFiles.set(number, retained);
         return Promise.resolve(retained);
       }
-      if (downloads.has(number)) return downloads.get(number);
+      const key = target.version + ":" + number;
+      if (downloads.has(key)) return downloads.get(key);
       const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
       const pending = api(url, {raw: true, timeout: 12000}).then(res => res.arrayBuffer()).then(bytes => {
         if (!stopped && bytes.byteLength <= pageCacheLimit) {
@@ -123,13 +237,13 @@
           retainedBytes += bytes.byteLength;
         }
         return bytes;
-      }).finally(() => downloads.delete(number));
-      downloads.set(number, pending);
+      }).finally(() => downloads.delete(key));
+      downloads.set(key, pending);
       return pending;
     }
 
     function pageFrame(target, number, w, h, onBytes) {
-      return cached('page:' + number + ':' + w + ':' + h, async () => {
+      return cached('page:' + target.version + ':' + number + ':' + w + ':' + h, async () => {
         const bytes = await pageBytes(target, number);
         onBytes?.();
         // PDF.js transfers the input to its worker. Keep the cached bytes intact.
@@ -140,6 +254,15 @@
           await pdf.doc.destroy();
         }
       });
+    }
+
+    function follow(target) {
+      const render = display(target).finally(() => {
+        if (activeRender !== render) return;
+        activeRender = null;
+        retryAfter = performance.now() + 350;
+      });
+      activeRender = render;
     }
 
     async function display(target) {
@@ -163,13 +286,7 @@
         if (deck) {
           frame = await cached('deck:' + target.page + ':' + w + ':' + h, () => renderPage(deck, target.page, w, h));
         } else if (target.pdf && (!faculty || !localFile)) {
-          try {
-            frame = await pageFrame(target, target.page, w, h, preloadNext);
-          } catch (err) {
-            if (err.status !== 409 || stopped || id !== renderId) throw err;
-            // An in-flight preload may have used the previous slide version.
-            frame = await pageFrame(target, target.page, w, h, preloadNext);
-          }
+          frame = await pageFrame(target, target.page, w, h, preloadNext);
         }
       } catch (err) {
         if (stopped || id !== renderId || err.status === 409) return;
@@ -180,10 +297,15 @@
       if (faculty && !frame) return;
       if (target.image) frame ??= el('img', {src: 'data:image/jpeg;base64,' + target.image, alt: target.page + '쪽 교안'});
       frame ??= el('p', {class: 'live-slide-text', text: target.text || '교안 화면을 준비하는 중입니다.'});
+      if (displayed !== target.page) {
+        picked = null;
+        if (feedback) feedback.textContent = '';
+      }
       displayed = target.page;
       page.textContent = target.page + ' / ' + target.total;
       status.textContent = '동기화 중';
       content.replaceChildren(frame);
+      marksKey = '';
       paintIndex();
       if (deck) {
         for (const number of [target.after ?? displayed + 1, target.before ?? displayed - 1]) {
@@ -203,6 +325,7 @@
       try {
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
+        if (indexVersion) params.set('index_version', indexVersion);
         const data = await api(path + '?' + params, {timeout: 10000});
         if (stopped) return;
         stamp = data.revision;
@@ -213,8 +336,17 @@
           if (slide?.visible_pages) visiblePages = slide.visible_pages;
           if (selected === null || slide?.page === selected) navigation = slide;
         }
-        items = data.index;
-        if (changed && (selected === null || data.status === 'CLOSED')) display(slide);
+        indexVersion = data.index_version;
+        if (data.index) items = data.index;
+        open = data.status === 'OPEN';
+        confusion = data.confusion;
+        if (changed && (selected === null || data.status === 'CLOSED')) {
+          follow(slide);
+        } else if (!faculty && slide && displayed !== slide.page && !activeRender && performance.now() >= retryAfter) {
+          // A temporary file/network error can occur while the page version
+          // stays unchanged. Reuse its full metadata and retry on live refresh.
+          follow(slide);
+        }
         if (selected === slide?.page) selected = null;
         paintIndex();
         if (!displayed && status.textContent === '') status.textContent = '교안 화면을 준비하는 중입니다.';
@@ -243,6 +375,10 @@
     function stop() {
       stopped = true;
       clearTimeout(timer);
+      document.removeEventListener('selectionchange', pickText);
+      content.removeEventListener('click', pickPoint);
+      confusedButton?.removeEventListener('click', sendConfusion);
+      askButton?.removeEventListener('click', askHere);
       window.removeEventListener('resize', resize);
       document.removeEventListener('fullscreenchange', resize);
       ++renderId;
@@ -266,7 +402,7 @@
     content.replaceChildren();
     index.replaceChildren();
     status.textContent = '교안 화면을 준비하는 중입니다.';
-    if (slide && (!faculty || !localFile)) display(slide);
+    if (slide && (!faculty || !localFile)) follow(slide);
     tick();
     if (faculty) {
       const remote = () => api(path + '/document', {raw: true}).then(res => res.arrayBuffer()).then(loadPdf);

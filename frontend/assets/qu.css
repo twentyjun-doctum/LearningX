@@ -233,3 +233,22 @@ button,input,textarea,select{font:inherit;color:inherit}
 .live-pdf-text > :not(.markedContent), .live-pdf-text .markedContent span:not(.markedContent) {z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg; transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));}
 .live-pdf-text .markedContent {display: contents;}
 .live-pdf-text ::selection {color: transparent; background: #4b83e878;}
+
+.live-actions {flex-wrap: wrap; margin-bottom: .5rem;}
+.live-marks {position: absolute; inset: 0; pointer-events: none; z-index: 2;}
+.live-mark {position: absolute; width: .8rem; height: .8rem; border: 2px solid white; border-radius: 50%; background: #13806a; transform: translate(-50%, -50%);}
+.live-mark.picked {background: #315dba;}
+.live-mark.shallow {background: #758980;}
+.live-mark.mid {background: #51a876;}
+.live-mark.confused {background: #a64709; color: white; width: 1.35rem; height: 1.35rem; display: grid; place-items: center; font-size: .67rem;}
+.live-slide-strip, .live-strip-page {display: flex; align-items: center; flex-wrap: wrap; gap: .3rem;}
+.live-slide-strip {margin-bottom: .5rem;}
+.live-strip-page {font-size: .78rem;}
+.live-strip-page .live-tab {min-width: .7rem; min-height: 1.1rem; padding: 0;}
+.live-tab-preview {display: none; white-space: normal;}
+.live-tab-preview small {display: block; margin-bottom: .25rem;}
+.live-tab:hover .live-tab-preview, .live-tab:focus-visible .live-tab-preview {display: block;}
+#teacher-slide:fullscreen [data-live-index] {position: absolute; z-index: 5; top: 20%; right: 0; display: flex; overflow: visible;}
+#teacher-slide:fullscreen .live-tab {position: relative; width: .85rem; height: 2.05rem; min-width: 0; padding: 0;}
+#teacher-slide:fullscreen .live-tab-label, #teacher-slide:fullscreen .live-marks {display: none;}
+#teacher-slide:fullscreen .live-tab-preview {position: absolute; right: 100%; top: 0; width: min(24rem, 72vw); background: #fff; color: #15251e; border: 1px solid #a6b4ad; text-align: left; padding: .75rem; border-radius: .5rem; overflow-wrap: anywhere;}

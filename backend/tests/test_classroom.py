@@ -83,15 +83,28 @@ class ClassroomTests(unittest.TestCase):
             self.assertEqual(snap["text"], "Shared slide")
             self.assertNotIn("text", self.req("GET", path + "/live?version=" + snap["version"], first).json()["slide"])
             self.req("PUT", path + "/live", self.tf, json={"page": 2})
+        anchor = {"x": .31, "y": .52, "quote": "선택한 교안 문구"}
+        reaction = path + "/live/confusion"
+        self.assertEqual(self.req("PUT", reaction, first, json={"page": 1, "anchor": anchor}).status_code, 409)
+        for _ in range(2):
+            self.assertEqual(self.req("PUT", reaction, first, json={"page": 2, "anchor": anchor}).status_code, 200)
+        summary = self.req("GET", path + "/live", self.tf).json()["confusion"]
+        self.assertEqual(summary, {"count": 1, "spots": [{"x": .3, "y": .5, "count": 1}]})
+        self.assertIsNone(self.req("GET", path + "/live", second).json()["confusion"])
+        self.assertTrue(self.req("GET", path + "/live", first).json()["confusion"]["mine"])
         with patch.object(nit, "coach_question", return_value=coaching("analyze")):
             question = self.req("POST", path + "/questions", first,
-                                json={"question": "질문의 근거는 무엇인가요?", "slide_page": 1}).json()
+                                json={"question": "질문의 근거는 무엇인가요?", "slide_page": 1, "anchor": anchor}).json()
         self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], [])
         self.assertEqual(self.req("GET", path + "/live", second).json()["index"], [])
-        expected = [{"id": question["id"], "level": "mid", "page": 1}]
+        expected = [{"id": question["id"], "level": "mid", "page": 1,
+                     "text": "질문의 근거는 무엇인가요?", "anchor": anchor}]
         self.assertEqual(self.req("GET", path + "/live", first).json()["index"], expected)
         self.req("POST", f"/v1/session-questions/{question['id']}/submit", first)
-        self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], expected)
+        live = self.req("GET", path + "/live", self.tf).json()
+        self.assertEqual(live["index"], expected)
+        self.assertNotIn("index", self.req("GET", path + "/live", self.tf,
+                                           params={"index_version": live["index_version"]}).json())
         self.req("POST", f"/v1/session-questions/{question['id']}/hide", self.tf)
         self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], [])
         self.req("PUT", path + "/state", self.tf, json={"status": "CLOSED"})
