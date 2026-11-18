@@ -108,7 +108,7 @@
     media.hidden = !/\.pptx$/i.test(documentFile.name);
     acknowledge.required = !media.hidden;
     review.hidden = !data.eligible_candidates.length;
-    status.textContent = review.hidden ? '승인 가능한 교안 근거가 없습니다.' : '분석 완료 · 근거를 검토해 주세요.';
+    status.textContent = review.hidden ? '승인 가능한 교안 근거가 없습니다.' : '텍스트 추출 완료 · 이미지·도표 해석은 수행되지 않았습니다. 승인할 근거를 검토해 주세요.';
   }
 
   async function start(event) {
