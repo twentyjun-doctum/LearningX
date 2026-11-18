@@ -7,8 +7,7 @@ Scope (Question-up redesign MVP):
 - Faculty sees submitted questions only, anonymised, can filter, hide and project them.
 - Faculty exports the session as CSV without any student identifier.
 
-Out of scope here (needs further development): realtime push, slide casting,
-confusion gauges, highlight drag, index tabs, AI suitability filter.
+Live slide snapshots and slide-linked question indexes use the same session permissions.
 """
 import csv
 import io
@@ -28,6 +27,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
+from .live_slides import LiveSlide, QuestionSlide, build_snapshot
 from .security import actor, issue_token, require_course, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
@@ -98,7 +98,12 @@ class JoinRequest(BaseModel):
     code: str = Field(min_length=JOIN_LENGTH, max_length=JOIN_LENGTH)
 
 
+class ShareSlide(BaseModel):
+    page: int = Field(ge=1)
+
+
 class SessionAsk(BaseModel):
+    slide_page: int | None = Field(default=None, ge=1)
     question: str = Field(min_length=5, max_length=2000)
 
 
@@ -285,6 +290,52 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
     return _public_session(db, s, faculty=True)
 
 
+@router.get("/sessions/{session_id}/live")
+def live_snapshot(session_id: str, response: Response, version: str = "", db: Session = Depends(session),
+                  user: User = Depends(actor)):
+    current = _session_or_404(db, session_id)
+    member = db.query(Member).filter_by(course_id=current.course_id, user_id=user.id).first()
+    faculty = member is not None and member.role == "faculty"
+    if not faculty:
+        _participant_session(db, session_id, user)
+    response.headers["Cache-Control"] = "no-store"
+    if current.status == "CLOSED":
+        return {"status": current.status, "slide": None, "index": []}
+    slide = db.get(LiveSlide, session_id)
+    query = db.query(SessionQuestion.id, SessionQuestion.level, QuestionSlide.page).join(
+        QuestionSlide, QuestionSlide.question_id == SessionQuestion.id
+    ).filter(SessionQuestion.session_id == session_id)
+    if faculty:
+        query = query.filter(SessionQuestion.submitted.is_(True), SessionQuestion.hidden.is_(False))
+    else:
+        query = query.filter(SessionQuestion.student_id == user.id)
+    index = [{"id": row.id, "level": row.level, "page": row.page}
+             for row in query.order_by(SessionQuestion.created_at.desc()).limit(500)]
+    snapshot = None
+    if slide:
+        snapshot = {"page": slide.page, "total": slide.total, "version": slide.version}
+        if version != slide.version:
+            snapshot.update(json.loads(slide.content))
+    return {"status": current.status, "slide": snapshot, "index": index}
+
+
+@router.put("/sessions/{session_id}/live")
+def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session), user: User = Depends(actor)):
+    current = _faculty_session(db, session_id, user)
+    if current.status == "CLOSED":
+        raise HTTPException(409, "Class has ended")
+    material = db.get(Material, current.material_id)
+    total, content = build_snapshot(material, data.page)
+    # Serialize presenters sharing the same classroom.
+    db.refresh(current, with_for_update=True)
+    if current.status == "CLOSED":
+        raise HTTPException(409, "Class has ended")
+    db.merge(LiveSlide(session_id=session_id, page=data.page, total=total, version=uid(),
+                       content=json.dumps(content, ensure_ascii=False)))
+    db.commit()
+    return {"page": data.page, "total": total}
+
+
 @router.get("/sessions/{session_id}/board")
 def board(session_id: str, level: Literal["all", "shallow", "mid", "deep"] = "all",
           include_hidden: bool = False, db: Session = Depends(session), user: User = Depends(actor)):
@@ -418,6 +469,11 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
     s = _participant_session(db, session_id, user)
     if s.status != "OPEN":
         raise HTTPException(423, "The class is not taking questions right now")
+    slide = db.get(LiveSlide, session_id)
+    page = slide.page if slide else None
+    if data.slide_page is not None and (slide is None or data.slide_page > slide.total):
+        raise HTTPException(422, "Invalid question slide")
+    page = data.slide_page or page
     coaching = _coach(db, s, user, data.question)
     q = Question(course_id=s.course_id, material_id=s.material_id, student_id=user.id,
                  text=data.question, feedback_json=json.dumps(coaching, ensure_ascii=False))
@@ -427,6 +483,9 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
     row = SessionQuestion(session_id=s.id, question_id=q.id, student_id=user.id, level=lvl, first_level=lvl,
                           latest_text=data.question, latest_coaching_json=json.dumps(coaching, ensure_ascii=False))
     db.add(row)
+    if page is not None:
+        db.flush()
+        db.add(QuestionSlide(question_id=row.id, page=page))
     _audit(db, user.id, s.course_id, "session_question_coached", s.material_id, detail=str(coaching.get("mode")))
     db.commit()
     return {"id": row.id, "level": row.level, "coaching": _student_coaching(coaching)}
@@ -476,8 +535,11 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
     s = _participant_session(db, session_id, user)
     rows = (db.query(SessionQuestion).filter_by(session_id=s.id, student_id=user.id)
             .order_by(SessionQuestion.created_at.desc()).all())
+    pages = dict(db.query(QuestionSlide.question_id, QuestionSlide.page).join(
+        SessionQuestion, SessionQuestion.id == QuestionSlide.question_id
+    ).filter(SessionQuestion.session_id == session_id, SessionQuestion.student_id == user.id).all())
     return {"session": _public_session(db, s),
-            "items": [{"id": r.id, "level": r.level, "level_label": LEVEL_LABEL[r.level],
+            "items": [{"id": r.id, "slide_page": pages.get(r.id), "level": r.level, "level_label": LEVEL_LABEL[r.level],
                        "text": r.latest_text, "original": _original_text(db, r),
                        "submitted": r.submitted, "submitted_at": _iso(r.submitted_at),
                        "coaching": _student_coaching(json.loads(r.latest_coaching_json))} for r in rows]}

@@ -59,6 +59,40 @@ class ClassroomTests(unittest.TestCase):
         headers = {"Authorization": "Bearer " + token} if token else {}
         return self.client.request(method, path, headers=headers, **kw)
 
+    def test_live_slide_index_scopes(self):
+        cid = self.course_id
+        self.req("PUT", f"/v1/courses/{cid}/policy", self.tf,
+                 json={"policy": "RESTRICTED_HINT_ONLY", "teacher_approved": True})
+        with patch.object(nit, "verified_count", return_value=1):
+            opened = self.req("POST", f"/v1/courses/{cid}/sessions", self.tf,
+                              json={"material_id": self.material_id}).json()
+        path = f"/v1/sessions/{opened['id']}"
+        first, second = [
+            self.req("POST", "/v1/join", json={"code": opened["join_code"]}).json()["access_token"]
+            for _ in range(2)
+        ]
+        self.assertEqual(self.req("GET", path + "/live", self.to).status_code, 403)
+        self.assertEqual(self.req("PUT", path + "/live", first, json={"page": 1}).status_code, 403)
+        with patch.object(classroom, "build_snapshot", return_value=(3, {"text": "Shared slide"})):
+            self.assertEqual(self.req("PUT", path + "/live", self.tf, json={"page": 1}).status_code, 200)
+            snap = self.req("GET", path + "/live", first).json()["slide"]
+            self.assertEqual(snap["text"], "Shared slide")
+            self.assertNotIn("text", self.req("GET", path + "/live?version=" + snap["version"], first).json()["slide"])
+            self.req("PUT", path + "/live", self.tf, json={"page": 2})
+        with patch.object(nit, "coach_question", return_value=coaching("analyze")):
+            question = self.req("POST", path + "/questions", first,
+                                json={"question": "질문의 근거는 무엇인가요?", "slide_page": 1}).json()
+        self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], [])
+        self.assertEqual(self.req("GET", path + "/live", second).json()["index"], [])
+        expected = [{"id": question["id"], "level": "mid", "page": 1}]
+        self.assertEqual(self.req("GET", path + "/live", first).json()["index"], expected)
+        self.req("POST", f"/v1/session-questions/{question['id']}/submit", first)
+        self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], expected)
+        self.req("POST", f"/v1/session-questions/{question['id']}/hide", self.tf)
+        self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], [])
+        self.req("PUT", path + "/state", self.tf, json={"status": "CLOSED"})
+        self.assertIsNone(self.req("GET", path + "/live", first).json()["slide"])
+
     def test_full_flow(self):
         cid, mid = self.course_id, self.material_id
         # Coaching consent is required before opening.
