@@ -52,6 +52,7 @@
     window.scrollTo(0, 0);
   }
   let liveView;
+  let questionAnchor;
   function stopPoll() {
     liveView?.stop();
     liveView = null;
@@ -123,6 +124,13 @@
     stopPoll();
     liveView = window.QU.createLiveView({
       api, session: st.session.id, panel: $('student-slide'), initial,
+      onAnchor: ({page, anchor}) => {
+        if (st.current || st.sending) return false;
+        questionAnchor = {page, anchor};
+        $('q-input').focus();
+        $('q-input').placeholder = anchor?.quote ? '“' + anchor.quote + '”에 관해 질문하세요' : page + '쪽에 관해 질문하세요';
+        return true;
+      },
       onState: ({status}) => {
         if (status !== st.session.status) applyStatus(status);
       },
@@ -135,6 +143,8 @@
 
   function resetThread() {
     st.current = null;
+    questionAnchor = null;
+    $('q-input').placeholder = '궁금한 점을 적어 보세요';
     $('thread').replaceChildren();
     setStage('seed');
     coachMsg(el('span', { text: '오늘 수업에서 궁금한 점을 질문으로 써 보세요. 먼저 내 생각대로 쓰면, 질문이 한 마디씩 자라도록 도와 드릴게요.' }));
@@ -175,7 +185,7 @@
     try {
       const res = st.current
         ? await api(`/v1/session-questions/${st.current.id}/revisions`, { method: 'POST', body: { text }, timeout: 90000 })
-        : await api(`/v1/sessions/${st.session.id}/questions`, { method: 'POST', body: { question: text, slide_page: liveView?.page() }, timeout: 90000 });
+        : await api(`/v1/sessions/${st.session.id}/questions`, { method: 'POST', body: { question: text, slide_page: questionAnchor?.page ?? liveView?.page(), anchor: questionAnchor?.anchor }, timeout: 90000 });
       typing.remove();
       if (!st.current) st.current = { id: res.id, original: text };
       st.current.level = res.level;

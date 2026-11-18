@@ -10,6 +10,7 @@ Scope (Question-up redesign MVP):
 Live slide snapshots and slide-linked question indexes use the same session permissions.
 """
 import csv
+import hashlib
 import io
 import json
 import os
@@ -22,7 +23,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from . import engine_adapter as nit
@@ -85,6 +86,21 @@ class SessionQuestion(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
 
 
+class SlideConfusion(Base):
+    __tablename__ = "slide_confusions"
+    session_id: Mapped[str] = mapped_column(ForeignKey("class_sessions.id"), primary_key=True)
+    page: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    x: Mapped[int | None] = mapped_column(Integer)
+    y: Mapped[int | None] = mapped_column(Integer)
+
+
+class QuestionAnchor(Base):
+    __tablename__ = "question_anchors"
+    question_id: Mapped[str] = mapped_column(ForeignKey("session_questions.id"), primary_key=True)
+    location: Mapped[str] = mapped_column(Text)
+
+
 # ---------- schemas ----------
 
 class OpenSession(BaseModel):
@@ -103,8 +119,20 @@ class ShareSlide(BaseModel):
     page: int = Field(ge=1)
 
 
+class SlideAnchor(BaseModel):
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    quote: str = Field(default="", max_length=240)
+
+
+class ConfusionRequest(BaseModel):
+    page: int = Field(ge=1)
+    anchor: SlideAnchor | None = None
+
+
 class SessionAsk(BaseModel):
     slide_page: int | None = Field(default=None, ge=1)
+    anchor: SlideAnchor | None = None
     question: str = Field(min_length=5, max_length=2000)
 
 
@@ -304,7 +332,8 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
 
 @router.get("/sessions/{session_id}/live")
 async def live_snapshot(session_id: str, response: Response, version: str = "",
-                        after: str | None = None, db: Session = Depends(session), user: User = Depends(actor)):
+                        after: str | None = None, index_version: str = "",
+                        db: Session = Depends(session), user: User = Depends(actor)):
     if after is not None and after == revision(session_id):
         await run_in_threadpool(_live_access, db, session_id, user)
         await run_in_threadpool(db.rollback)
@@ -312,7 +341,10 @@ async def live_snapshot(session_id: str, response: Response, version: str = "",
     stamp = revision(session_id)
     response.headers["Cache-Control"] = "no-store"
     snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version)
-    return {**snapshot, "revision": stamp}
+    index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
+    if index_version == index_stamp:
+        del snapshot["index"]
+    return {**snapshot, "revision": stamp, "index_version": index_stamp}
 
 
 def _live_access(db, session_id, user):
@@ -338,19 +370,34 @@ def _snapshot(db, session_id, user, version):
     if current.status == "CLOSED":
         return {"status": current.status, "slide": None, "index": []}
     slide = db.get(LiveSlide, session_id)
-    query = db.query(SessionQuestion.id, SessionQuestion.level, QuestionSlide.page).join(
+    query = db.query(SessionQuestion.id, SessionQuestion.level, QuestionSlide.page,
+                     SessionQuestion.latest_text, QuestionAnchor.location).join(
         QuestionSlide, QuestionSlide.question_id == SessionQuestion.id
-    ).filter(SessionQuestion.session_id == session_id)
+    ).outerjoin(QuestionAnchor, QuestionAnchor.question_id == SessionQuestion.id).filter(SessionQuestion.session_id == session_id)
     if faculty:
         query = query.filter(SessionQuestion.submitted.is_(True), SessionQuestion.hidden.is_(False))
     else:
         query = query.filter(SessionQuestion.student_id == user.id)
-    index = [{"id": row.id, "level": row.level, "page": row.page}
+    index = [{"id": row.id, "level": row.level, "page": row.page, "text": row.latest_text,
+              "anchor": json.loads(row.location) if row.location else None}
              for row in query.order_by(SessionQuestion.created_at.desc()).limit(500)]
+    confusion = None
+    if slide:
+        votes = db.query(SlideConfusion).filter_by(session_id=session_id, page=slide.page)
+        if faculty:
+            groups = votes.with_entities(SlideConfusion.x, SlideConfusion.y, func.count()).group_by(
+                SlideConfusion.x, SlideConfusion.y).all()
+            confusion = {"count": sum(count for _, _, count in groups), "spots": [
+                {"x": x / 20, "y": y / 20, "count": count} for x, y, count in groups if x is not None]}
+        else:
+            own = votes.filter_by(student_id=user.id).first()
+            if own:
+                confusion = {"mine": True, "spots": [] if own.x is None else [
+                    {"x": own.x / 20, "y": own.y / 20, "count": 1}]}
     snapshot = _slide_metadata(slide, version)
     if faculty and snapshot and snapshot.get("pdf"):
         snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
-    return {"status": current.status, "slide": snapshot, "index": index}
+    return {"status": current.status, "slide": snapshot, "index": index, "confusion": confusion}
 
 
 @router.get("/sessions/{session_id}/live/document")
@@ -551,6 +598,28 @@ def join(data: JoinRequest, request: Request, response: Response, db: Session = 
             "initial_live": {"status": s.status, "slide": _slide_metadata(db.get(LiveSlide, s.id)), "index": []}}
 
 
+@router.put("/sessions/{session_id}/live/confusion")
+def flag_confusion(session_id: str, data: ConfusionRequest, db: Session = Depends(session), user: User = Depends(actor)):
+    current = _participant_session(db, session_id, user)
+    # Serialize duplicate votes together with live state changes.
+    db.refresh(current, with_for_update=True)
+    if current.status != "OPEN":
+        raise HTTPException(423, "The class is not taking feedback right now")
+    slide = db.get(LiveSlide, session_id)
+    if not slide or slide.page != data.page:
+        raise HTTPException(409, "The shared page changed")
+    anchor = data.anchor
+    x = round(anchor.x * 20) if anchor else None
+    y = round(anchor.y * 20) if anchor else None
+    vote = db.get(SlideConfusion, (session_id, data.page, user.id))
+    if vote and (vote.x, vote.y) == (x, y):
+        return {"page": data.page}
+    db.merge(SlideConfusion(session_id=session_id, page=data.page, student_id=user.id, x=x, y=y))
+    db.commit()
+    notify(session_id)
+    return {"page": data.page}
+
+
 @router.post("/sessions/{session_id}/questions", status_code=201)
 def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session), user: User = Depends(actor)):
     s = _participant_session(db, session_id, user)
@@ -561,6 +630,8 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
     if data.slide_page is not None and (slide is None or data.slide_page > slide.total):
         raise HTTPException(422, "Invalid question slide")
     page = data.slide_page or page
+    if data.anchor and (data.slide_page is None or page not in visible_pages(db.get(Material, s.material_id))):
+        raise HTTPException(422, "Invalid question anchor")
     coaching = _coach(db, s, user, data.question)
     q = Question(course_id=s.course_id, material_id=s.material_id, student_id=user.id,
                  text=data.question, feedback_json=json.dumps(coaching, ensure_ascii=False))
@@ -573,6 +644,8 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
     if page is not None:
         db.flush()
         db.add(QuestionSlide(question_id=row.id, page=page))
+        if data.anchor:
+            db.add(QuestionAnchor(question_id=row.id, location=data.anchor.model_dump_json()))
     _audit(db, user.id, s.course_id, "session_question_coached", s.material_id, detail=str(coaching.get("mode")))
     db.commit()
     notify(s.id)
