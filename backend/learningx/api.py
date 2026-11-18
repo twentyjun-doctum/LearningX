@@ -17,6 +17,7 @@ from .security import actor, session, require_course, secret, issue_token
 from . import engine_adapter as nit
 from . import private_store
 from .ingest_queue import router as ingest_router
+from .classroom import router as classroom_router
 
 app=FastAPI(title="LearningX NIT Backend",version="0.1.0",docs_url=None,redoc_url=None)
 # Frontend origins must be explicitly configured; no wildcard CORS with bearer tokens.
@@ -286,3 +287,6 @@ def course_materials(course_id:str,db:Session=Depends(session),user:User=Depends
 
 # Durable direct-upload and asynchronous job lifecycle.
 app.include_router(ingest_router)
+
+# Live class sessions: join codes, anonymous students, question board.
+app.include_router(classroom_router)

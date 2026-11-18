@@ -10,6 +10,19 @@
 - 교수자 승인과 학생 질문은 실제 백엔드 및 frozen v1.6.2 엔진이 설치된 경우에만 작동합니다. 백엔드 미배포·SSO 미구현·실물 교안 승인 미완료 상태이므로 **이 화면 자체가 운영 가능한 제품은 아닙니다**.
 - 원래 v3 시안에 있는 6자리 수업 코드·학생 익명 공개·질문 군집화·실시간 질문 분류는 아직 서버 API에 없으므로 데모/예정으로만 표기합니다.
 
+## Question-up 리디자인 화면 (feat/question-up-redesign-mvp)
+
+| 파일 | 역할 |
+|---|---|
+| `index.html` | 진입: 학생 코드 입장 / 교수자 시작 (기존 소개는 `intro.html`) |
+| `teacher.html` + `assets/qu-teacher.js` | 초대 코드 → 내 수업 → 교안 올리기 → 검토·승인(AI 코칭 동의) → 수업 중 질문 보드(5초 폴링, 수준 필터, 숨기기) → 화면에 띄우기 → 종료·CSV |
+| `student.html` + `assets/qu-student.js`, `assets/qu-plant.js` | 코드 입장(익명) → 대화형 질문 코치 + 콩나무 → 교수자에게 보내기 → 내 질문 |
+| `assets/qu.css`, `assets/qu-api.js` | 디자인 사양 토큰(세이지 팔레트, Freesentation) · 공용 API 클라이언트 |
+
+새 백엔드 엔드포인트는 `backend/learningx/classroom.py`(`/v1/courses/{id}/sessions`, `/v1/join`, `/v1/sessions/{id}/board` 등)에 있습니다.
+토큰은 메모리에만 두며, CSP를 지키기 위해 인라인 스크립트·style 속성을 쓰지 않습니다.
+아직 포함하지 않은 기능: 실시간 슬라이드 송출·동기화, 헷갈려요/사례 더 게이지, 드래그 하이라이트, AI 자동 필터, 실명·SSO, 실시간 푸시(현재 폴링).
+
 ## Vercel
 
 - GitHub: `zxmk9123-creator/LearningX`

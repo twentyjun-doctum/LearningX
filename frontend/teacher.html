@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Question-up · 교수자</title>
+<link rel="icon" href="assets/brand/question-up-app-icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-kr@5/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-kr@5/700.css">
+<link rel="stylesheet" href="assets/qu.css">
+</head>
+<body>
+<header class="qu-header">
+  <div class="crumbs">
+    <a class="qu-brand" href="index.html"><img src="assets/brand/question-up-app-icon.svg" alt="">Question-up</a>
+    <span class="sep" id="crumb-sep" hidden>/</span><b id="crumb" hidden></b>
+  </div>
+  <div class="right">
+    <nav class="stepper" id="stepper" aria-label="수업 준비 단계" hidden>
+      <span data-step="1"><i>1</i>교안 올리기</span>
+      <span data-step="2"><i>2</i>검토·승인</span>
+      <span data-step="3"><i>3</i>수업 시작</span>
+    </nav>
+    <span class="chip ok" id="live-chip" hidden><span class="dot"></span>질문 받는 중</span>
+    <span class="chip" id="paused-chip" hidden>잠시 멈춤</span>
+    <a class="btn ghost sm" id="to-courses" href="#courses" hidden>내 수업</a>
+  </div>
+</header>
+
+<main class="qu-main" id="main">
+  <p class="notice" id="global-error" role="alert" hidden></p>
+
+  <!-- 1 · 베타 진입 -->
+  <section id="screen-login" class="qu-narrow" data-screen hidden>
+    <form id="login-form" class="card stack" novalidate>
+      <span class="chip ok">교수자 베타</span>
+      <h1 class="page-title">초대 코드로 시작하기</h1>
+      <p class="sub">운영진에게 받은 교수자 초대 코드를 입력하세요. 코드는 이 화면에서만 쓰이고 저장되지 않습니다.</p>
+      <div class="field">
+        <label for="invite">베타 초대 코드</label>
+        <input id="invite" class="input" type="password" autocomplete="off" spellcheck="false" required>
+      </div>
+      <p class="error" id="login-error" hidden></p>
+      <button class="btn lg block" type="submit">시작하기</button>
+    </form>
+  </section>
+
+  <!-- 3 · 내 수업 -->
+  <section id="screen-courses" data-screen hidden>
+    <div class="row between">
+      <div><h1 class="page-title">내 수업</h1><p class="page-sub">교안을 올리고 검토를 마치면 바로 수업을 시작할 수 있습니다.</p></div>
+      <button class="btn primary" id="new-course" type="button">+ 새 수업 준비</button>
+    </div>
+    <div class="list" id="course-list" aria-live="polite"></div>
+    <p class="muted">교안은 비공개로 보관되며, 학생에게는 교수자가 승인한 내용만 근거로 쓰입니다.</p>
+  </section>
+
+  <!-- 2 · 교안 올리기 -->
+  <section id="screen-upload" class="qu-narrow" data-screen hidden>
+    <h1 class="page-title">이번 수업의 교안을 올려 주세요</h1>
+    <form id="upload-form" class="card stack" novalidate>
+      <div class="field" id="course-title-field">
+        <label for="course-title">수업 이름</label>
+        <input id="course-title" class="input" placeholder="예: 3주차 · 의제설정 이론" maxlength="180">
+      </div>
+      <div class="field">
+        <label for="upload-file">교안 파일 (PDF·PPTX, 100MB까지)</label>
+        <input id="upload-file" class="input" type="file" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+      </div>
+      <div class="card tight stack" id="upload-progress" hidden>
+        <div class="row between"><b id="upload-name"></b><span class="muted" id="upload-state"></span></div>
+        <div class="progress" id="upload-bar"><span></span></div>
+      </div>
+      <label class="check"><input type="checkbox" id="upload-rights">업로드할 권한이 있는 강의 자료입니다.</label>
+      <p class="error" id="upload-error" hidden></p>
+      <div class="row between">
+        <span class="muted">올리기가 끝나면 분석은 서버에서 계속되니 이 화면을 닫아도 됩니다.</span>
+        <button class="btn primary" type="submit" id="upload-submit">올리기</button>
+      </div>
+    </form>
+  </section>
+
+  <!-- 4 · 검토·승인 -->
+  <section id="screen-prepare" data-screen hidden>
+    <div><h1 class="page-title">학생 코칭에 쓸 내용을 골라 주세요</h1>
+      <p class="page-sub">승인한 내용만 AI가 학생에게 근거로 인용합니다. 나머지는 학생에게 보이지 않습니다.</p></div>
+    <div class="stats">
+      <div class="stat"><div class="k">승인 가능</div><div class="v" id="cand-count">–</div></div>
+      <div class="stat accent"><div class="k">선택함</div><div class="v" id="cand-selected">0</div></div>
+      <div class="stat"><div class="k">이미 승인됨</div><div class="v" id="cand-approved">–</div></div>
+    </div>
+    <p class="notice" id="media-notice" hidden>이 교안의 내레이션 오디오나 도표는 분석되지 않아 코칭에 쓰이지 않습니다.</p>
+    <div class="list">
+      <div class="head row between"><span>교안 내용</span><button class="btn sm" type="button" id="select-all">모두 선택</button></div>
+      <p class="muted small">코칭에 사용할 내용을 한 번에 최대 1,000개 선택해 주세요. 다시 승인하면 선택한 내용으로 승인 범위가 바뀝니다.</p>
+      <div id="candidate-list"></div>
+    </div>
+    <div class="card tight stack">
+      <label class="check" id="media-ack-row" hidden><input type="checkbox" id="media-ack">분석되지 않은 오디오·도표가 있다는 것을 확인했습니다.</label>
+      <label class="check"><input type="checkbox" id="ai-consent">이 수업에서 학생 질문 코칭에 AI를 사용합니다. AI는 정답을 알려 주지 않고, 승인한 근거로 되묻기만 합니다.</label>
+    </div>
+    <p class="error" id="prepare-error" hidden></p>
+  </section>
+
+  <!-- 5–6 · 수업 중 -->
+  <section id="screen-live" data-screen hidden>
+    <div class="live-grid">
+      <aside class="card stack" aria-label="입장 안내">
+        <span class="sub">학생 입장 코드</span>
+        <div class="joincode" id="live-code">––––––</div>
+        <p class="sub">학생은 <b id="live-url"></b>에서 코드를 입력합니다.</p>
+        <button class="btn dark block" type="button" id="code-full">코드를 화면 가득 띄우기</button>
+        <div class="row between"><span class="sub">입장한 학생</span><b id="live-joined">0명</b></div>
+        <div class="row between"><span class="sub">받은 질문</span><b id="live-total">0개</b></div>
+        <hr>
+        <div class="row"><button class="btn grow" type="button" id="pause-toggle">질문 받기 멈춤</button>
+          <button class="btn grow" type="button" id="end-class">수업 종료</button></div>
+      </aside>
+      <section class="stack" aria-label="들어온 질문">
+        <div class="row between">
+          <h2 class="page-title">들어온 질문</h2>
+          <div class="seg" role="group" aria-label="질문 수준" id="level-filter">
+            <button type="button" data-level="all" aria-pressed="true">전체 <span data-count="all">0</span></button>
+            <button type="button" data-level="deep" aria-pressed="false">깊은 <span data-count="deep">0</span></button>
+            <button type="button" data-level="mid" aria-pressed="false">중간 <span data-count="mid">0</span></button>
+            <button type="button" data-level="shallow" aria-pressed="false">얕은 <span data-count="shallow">0</span></button>
+          </div>
+        </div>
+        <div class="stack" id="board" aria-live="polite"></div>
+        <p class="muted">질문은 이름 없이 들어옵니다. 5초마다 새로 불러옵니다.</p>
+      </section>
+    </div>
+  </section>
+
+  <!-- 8 · 종료 -->
+  <section id="screen-end" class="qu-narrow" data-screen hidden>
+    <div><h1 class="page-title">수업을 마쳤어요</h1><p class="page-sub">입장 코드는 만료됐고, 학생들은 더 이상 질문을 보낼 수 없습니다.</p></div>
+    <div class="stats" id="end-stats"></div>
+    <div class="card stack">
+      <h3>전체 질문 내려받기</h3>
+      <p class="sub">처음 질문, 다시 쓴 질문, 수준, 시각이 담깁니다. 학생 정보는 없고 숨긴 질문은 빠집니다.</p>
+      <div><button class="btn lg" type="button" id="export-csv">CSV 내려받기</button></div>
+    </div>
+    <a class="btn" href="#courses">내 수업으로</a>
+  </section>
+</main>
+
+<div class="actionbar" id="prepare-bar" hidden>
+  <span><b id="bar-count">0쪽</b><span class="sub">을 근거로 승인합니다</span></span>
+  <div class="row"><a class="btn" href="#courses">나중에 하기</a><button class="btn lg" type="button" id="approve-start">승인하고 수업 시작</button></div>
+</div>
+
+<div class="projector" id="projector" hidden>
+  <div class="top"><span class="label" id="proj-label">학생 질문</span><span class="sub">입장 코드 <b id="proj-code"></b></span></div>
+  <p class="q" id="proj-text"></p>
+  <div class="bottom"><span class="sub" id="proj-meta"></span>
+    <div class="row"><button class="btn" type="button" id="proj-close">보드로 돌아가기</button><button class="btn dark" type="button" id="proj-next">다음 질문</button></div></div>
+</div>
+
+<script src="assets/qu-api.js"></script>
+<script src="assets/qu-teacher.js"></script>
+</body>
+</html>
