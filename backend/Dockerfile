@@ -11,15 +11,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-# Impress converts original slide layouts for live PPTX presentations.
-RUN apt-get update && apt-get install -y --no-install-recommends libreoffice-impress fonts-noto-cjk \
-    && rm -rf /var/lib/apt/lists/*
-
-# Opt-in image for OCR / Vision workers.
+# Opt-in image for OCR / Vision workers; keep the free native worker lightweight.
 ARG NIT_DEEP_RUNTIME=0
 RUN if [ "$NIT_DEEP_RUNTIME" = "1" ]; then \
       apt-get update && apt-get install -y --no-install-recommends \
-      tesseract-ocr tesseract-ocr-kor tesseract-ocr-eng \
+      tesseract-ocr tesseract-ocr-kor tesseract-ocr-eng libreoffice-impress fonts-noto-cjk \
       && rm -rf /var/lib/apt/lists/*; fi
 
 COPY requirements-deep.txt /app/requirements-deep.txt

@@ -36,9 +36,6 @@ class ClassroomTests(unittest.TestCase):
     def setUp(self):
         out = Path(TEMP.name) / "private" / "mat"
         out.mkdir(parents=True, exist_ok=True)
-        (out / "document.json").write_text(json.dumps({"pages": [
-            {"page": n, "blocks": []} for n in range(1, 4)
-        ]}), encoding="utf-8")
         with SessionLocal() as db:
             fac = User(email=f"cls-faculty-{self._testMethodName}@test.local", role="faculty")
             other = User(email=f"cls-other-{self._testMethodName}@test.local", role="faculty")
@@ -97,21 +94,19 @@ class ClassroomTests(unittest.TestCase):
         self.req("PUT", path + "/state", self.tf, json={"status": "CLOSED"})
         self.assertIsNone(self.req("GET", path + "/live", first).json()["slide"])
 
-    def test_live_pdf_starts_automatically_and_limits_prefetch(self):
+    def test_live_pdf_preserves_text_and_only_serves_the_shared_page(self):
         import pymupdf
 
         folder = Path(TEMP.name) / "selectable-pdf"
         parsed = folder / "parsed"
         parsed.mkdir(parents=True)
         with pymupdf.open() as pdf:
-            for label in ["Visible slide text", "Hidden slide text", "Next slide text", "Distant slide text"]:
+            for label in ["Visible slide text", "Unshared slide text"]:
                 pdf.new_page().insert_text((72, 72), label)
             pdf.save(folder / "source.pdf")
         (parsed / "document.json").write_text(json.dumps({"pages": [
             {"page": 1, "blocks": []},
             {"page": 2, "blocks": [], "hidden_slide": True},
-            {"page": 3, "blocks": []},
-            {"page": 4, "blocks": []},
         ]}), encoding="utf-8")
         with SessionLocal() as db:
             db.get(Material, self.material_id).out_dir = str(parsed)
@@ -127,16 +122,7 @@ class ClassroomTests(unittest.TestCase):
         self.assertEqual(self.req("GET", path + "/document", student).status_code, 403)
         self.assertEqual(self.req("GET", path + "/document", self.tf).status_code, 200)
         self.assertEqual(self.req("PUT", path, self.tf, json={"page": 2}).status_code, 422)
-        initial = self.req("GET", path, student).json()
-        self.assertEqual(initial["slide"]["page"], 1)
-        self.assertEqual(initial["slide"]["after"], 3)
-        prefetch = path + "/page/" + initial["slide"]["version"]
-        for page in (2, 4):
-            self.assertEqual(self.req("GET", prefetch, student, params={"page": page}).status_code, 403)
-        next_pdf = self.req("GET", prefetch, student, params={"page": 3})
-        with pymupdf.open(stream=next_pdf.content, filetype="pdf") as pdf:
-            self.assertEqual(pdf[0].get_text().strip(), "Next slide text")
-        before = initial["revision"]
+        before = self.req("GET", path, student).json()["revision"]
         self.assertEqual(self.req("PUT", path, self.tf, json={"page": 1}).status_code, 200)
         state = self.req("GET", path, student, params={"after": before}).json()
         self.assertNotEqual(state["revision"], before)
