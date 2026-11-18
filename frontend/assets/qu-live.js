@@ -50,6 +50,8 @@
     let deck = null;
     let slide = null;
     let selected = null;
+    let navigation = null;
+    let visiblePages = [];
     let displayed = null;
     let stopped = false;
     let timer;
@@ -83,6 +85,19 @@
       }, LEVEL[item.level])));
     }
 
+    function studentFrame(target, number, w) {
+      return cached('page:' + number + ':' + w, async () => {
+        const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
+        const res = await api(url, {raw: true, timeout: 12000});
+        const pdf = await loadPdf(await res.arrayBuffer());
+        try {
+          return await renderPage(pdf, 1, w);
+        } finally {
+          await pdf.doc.destroy();
+        }
+      });
+    }
+
     async function display(target) {
       const id = ++renderId;
       if (!target) {
@@ -97,32 +112,38 @@
       try {
         if (deck) {
           frame = await cached('deck:' + target.page + ':' + w, () => renderPage(deck, target.page, w));
-        } else if (target.pdf) {
-          frame = await cached('page:' + target.page + ':' + w, async () => {
-            const res = await api(path + '/page/' + encodeURIComponent(target.version), {raw: true, timeout: 12000});
-            const pdf = await loadPdf(await res.arrayBuffer());
-            try {
-              return await renderPage(pdf, 1, w);
-            } finally {
-              await pdf.doc.destroy();
-            }
-          });
+        } else if (!faculty && target.pdf) {
+          try {
+            frame = await studentFrame(target, target.page, w);
+          } catch (err) {
+            if (err.status !== 409 || stopped || id !== renderId) throw err;
+            // An in-flight preload may have used the previous slide version.
+            frame = await studentFrame(target, target.page, w);
+          }
         }
       } catch (err) {
-        if (err.status === 409) return;
+        if (stopped || id !== renderId || err.status === 409) return;
+        status.textContent = '교안 화면을 불러오지 못했습니다.';
+        return;
       }
       if (stopped || id !== renderId) return;
+      if (faculty && !frame) return;
       if (target.image) frame ??= el('img', {src: 'data:image/jpeg;base64,' + target.image, alt: target.page + '쪽 교안'});
-      frame ??= el('p', {class: 'live-slide-text', text: target.text || '표시할 텍스트가 없습니다.'});
+      frame ??= el('p', {class: 'live-slide-text', text: target.text || '교안 화면을 준비하는 중입니다.'});
       displayed = target.page;
       page.textContent = target.page + ' / ' + target.total;
+      status.textContent = '동기화 중';
       content.replaceChildren(frame);
       paintIndex();
       if (deck) {
-        for (const number of [displayed + 1, displayed - 1]) {
+        for (const number of [target.after ?? displayed + 1, target.before ?? displayed - 1]) {
           if (number > 0 && number <= deck.doc.numPages) {
             cached('deck:' + number + ':' + w, () => renderPage(deck, number, w)).catch(() => {});
           }
+        }
+      } else if (target.pdf) {
+        for (const number of [target.after, target.before]) {
+          if (number) studentFrame(target, number, w).catch(() => {});
         }
       }
     }
@@ -137,12 +158,16 @@
         stamp = data.revision;
         if (stamp === undefined) delay = 2000;
         const changed = slide?.version !== data.slide?.version;
-        if (changed) slide = data.slide;
+        if (changed) {
+          slide = data.slide;
+          if (slide?.visible_pages) visiblePages = slide.visible_pages;
+          if (selected === null || slide?.page === selected) navigation = slide;
+        }
         items = data.index;
         if (changed && (selected === null || data.status === 'CLOSED')) display(slide);
         if (selected === slide?.page) selected = null;
         paintIndex();
-        status.textContent = slide ? '동기화 중' : '';
+        if (!displayed && status.textContent === '') status.textContent = '교안 화면을 준비하는 중입니다.';
         onState(data);
         if (data.status === 'CLOSED') stop();
       } catch (err) {
@@ -178,7 +203,9 @@
     function select(number) {
       if (!deck) return;
       selected = number;
-      display({page: number, total: deck.doc.numPages});
+      const position = visiblePages.indexOf(number);
+      display({page: number, total: deck.doc.numPages,
+        before: visiblePages[position - 1], after: visiblePages[position + 1]});
     }
 
     panel.hidden = false;
@@ -190,13 +217,22 @@
       api(path + '/document', {raw: true}).then(res => res.arrayBuffer()).then(loadPdf).then(pdf => {
         if (stopped) return pdf.doc.destroy();
         deck = pdf;
-        select(slide?.page || 1);
-        if (!slide) selected = null;
+        if (slide) display(slide);
         onState({slide, total: deck.doc.numPages});
-      }).catch(() => {});
+      }).catch(() => { if (!stopped) status.textContent = '원본 교안 화면을 불러오지 못했습니다. 수업에 다시 접속해 주세요.'; });
     }
     return {
       stop, select, page: () => displayed,
+      acknowledge: result => { if (!stopped && (selected === null || selected === result.page)) navigation = result; },
+      neighbor: delta => {
+        if (!deck) return null;
+        const current = selected ?? slide?.page ?? displayed;
+        if (current === null) return null;
+        if (visiblePages.length) return visiblePages[visiblePages.indexOf(current) + delta];
+        if (navigation?.page === current && navigation.pdf) return delta < 0 ? navigation.before : navigation.after;
+        const next = current + delta;
+        return next >= 1 && next <= deck.doc.numPages ? next : null;
+      },
       target: () => selected ?? slide?.page ?? displayed,
       total: () => deck?.doc.numPages ?? slide?.total,
       reconcile: () => {
