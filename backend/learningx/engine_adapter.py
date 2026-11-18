@@ -12,9 +12,16 @@ import sys
 from fastapi import HTTPException
 
 def root():
-    path=Path(os.getenv("NIT_ENGINE_ROOT","")).expanduser()
-    if not os.getenv("NIT_ENGINE_ROOT") or not (path/"scripts"/"ingest.py").is_file() or not (path/"runtime"/"coaching.py").is_file():
-        raise HTTPException(503,"Frozen NIT engine is not installed")
+    # Prefer explicit, version-controlled path; fall back to reviewed vendored code.
+    configured=os.getenv("NIT_ENGINE_ROOT","").strip()
+    path=(Path(configured).expanduser() if configured
+          else Path(__file__).resolve().parents[1]/"nit_engine")
+    required=("scripts/ingest.py","scripts/parser_audit.py",
+              "scripts/verified_coaching.py","scripts/review_auth.py",
+              "scripts/text_normalization.py","scripts/verify_artifacts.py",
+              "runtime/coaching.py","runtime/gateway.py")
+    if not all((path/rel).is_file() for rel in required):
+        raise HTTPException(503,"Frozen NIT engine is not fully installed")
     return path.resolve()
 
 def _modules():

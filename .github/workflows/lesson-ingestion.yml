@@ -1,0 +1,53 @@
+name: NIT Long-Running Lesson Ingestion
+on:
+  repository_dispatch:
+    types: [learningx-ingest]
+  workflow_dispatch:
+  schedule:
+    # Fail-safe recovery for missed immediate dispatches. GitHub schedules can be delayed.
+    - cron: '*/5 * * * *'
+permissions:
+  contents: read
+concurrency:
+  group: learningx-ingestion-worker
+  cancel-in-progress: false
+jobs:
+  process:
+    if: ${{ vars.NIT_INGEST_WORKER_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATABASE_URL: ${{ secrets.LEARNINGX_DATABASE_URL }}
+      NIT_JWT_SECRET: ${{ secrets.NIT_JWT_SECRET }}
+      NIT_REVIEW_SIGNING_KEY: ${{ secrets.NIT_REVIEW_SIGNING_KEY }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.NEON_STORAGE_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.NEON_STORAGE_SECRET_ACCESS_KEY }}
+      AWS_ENDPOINT_URL_S3: ${{ vars.NEON_STORAGE_ENDPOINT }}
+      AWS_REGION: ap-southeast-1
+      NIT_STORAGE_BUCKET: learningx-private-lessons
+      NIT_ENGINE_ROOT: ${{ github.workspace }}/backend/nit_engine
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install parser runtime
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libreoffice-impress >/dev/null
+          python -m pip install -r backend/requirements.txt
+      - name: Verify required NIT engine modules
+        run: |
+          test -f backend/nit_engine/scripts/ingest.py
+          test -f backend/nit_engine/scripts/parser_audit.py
+          test -f backend/nit_engine/scripts/verified_coaching.py
+      - name: Process one requested job or recover backlog
+        working-directory: backend
+        env:
+          JOB_ID: ${{ github.event.client_payload.job_id }}
+        run: |
+          if [ -n "$JOB_ID" ]; then
+            python -m learningx.worker_cli --job-id "$JOB_ID" --max-jobs 1
+          else
+            python -m learningx.worker_cli --max-jobs 3
+          fi

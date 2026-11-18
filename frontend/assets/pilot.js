@@ -148,15 +148,58 @@
     await api('/v1/courses',{method:'POST',body:{title,policy:'RESTRICTED_HINT_ONLY',teacher_approved:false}});
     await refreshCourses();status('수업을 생성했습니다. 학생은 별도로 등록해야 접근할 수 있습니다.');$('course-title').value='';
   }catch(err){showError(err);}finally{busy(btn,false);}}
-  async function upload(e){e.preventDefault();const btn=e.submitter;busy(btn,true);try{
-    if(state.mode==='demo')throw new Error('선택한 파일은 전송하지 않았습니다. 실제 교안 등록은 서버 연결 모드에서만 가능합니다.');
-    const cid=$('faculty-course').value,file=$('material-file').files[0];if(!cid||!file)throw new Error('수업과 파일을 선택해 주세요.');
-    if(!/\.(pdf|pptx)$/i.test(file.name)||file.size>25*1024*1024)throw new Error('25MB 이하 PDF 또는 PPTX만 가능합니다.');
-    const body=new FormData();body.append('file',file,file.name);
-    const result=await api('/v1/courses/'+encodeURIComponent(cid)+'/materials',{method:'POST',body});
-    await refreshMaterials('faculty');
-    status('교안 '+(result.filename||'')+' 분석 요청 완료. 교수자 검토·서명 전까지 근거로 사용할 수 없습니다.');
-  }catch(err){showError(err);}finally{busy(btn,false);}}
+  let latestUploadId='';
+  async function readUploadStatus(){
+    if(state.mode!=='live')return;
+    const cid=$('faculty-course').value;
+    if(!cid||!latestUploadId)throw new Error('이 화면에 등록한 교안 업로드가 없습니다.');
+    const result=await api('/v1/courses/'+encodeURIComponent(cid)+'/uploads/'+encodeURIComponent(latestUploadId));
+    const coverage=result.analysis_coverage||{};
+    const warning=coverage.warning ? ' · 분석 범위: '+coverage.warning : '';
+    if(result.status==='READY'){
+      await refreshMaterials('faculty');
+      status('교안 분석 완료. 교수자 승인 후보를 검토하세요.'+warning);
+    }else if(result.status==='FAILED'){
+      status('교안 처리 실패 ('+(result.error_code||'UNKNOWN')+'). 승인 불가. 관리자 확인이 필요합니다.'+warning,true);
+    }else{
+      status('교안 업로드 상태: '+result.status+' (분석 작업 실행은 별도 워커가 담당합니다).'+warning);
+    }
+    return result;
+  }
+  async function upload(e){e.preventDefault();const btn=e.submitter;busy(btn,true);
+    try{
+      if(state.mode==='demo')throw new Error('데모 모드의 파일은 전송하지 않습니다. 실제 서명·AI 호출도 발생하지 않습니다.');
+      const cid=$('faculty-course').value,file=$('material-file').files[0];
+      if(!cid||!file)throw new Error('수업과 파일을 선택해 주세요.');
+      const max=100*1024*1024;
+      if(!/\.(pdf|pptx)$/i.test(file.name)||file.size<1||file.size>max)
+        throw new Error('PDF/PPTX만 등록할 수 있으며 파일 크기는 100MB 이하입니다.');
+      // Step 1: only metadata goes through the Vercel API (never the file body).
+      const path='/v1/courses/'+encodeURIComponent(cid)+'/uploads';
+      const signed=await api(path+'/initiate',{method:'POST',
+        body:{filename:file.name,size_bytes:file.size}});
+      const target=new URL(signed.upload_url);
+      if(target.protocol!=='https:'||!target.hostname.endsWith('.neon.tech'))
+        throw new Error('승인되지 않은 업로드 주소입니다.');
+      status('교안 원문을 비공개 저장소로 직접 업로드하고 있습니다.');
+      // Step 2: upload directly to Neon S3. NEVER forward JWT to this origin.
+      const controller=new AbortController();
+      const timer=setTimeout(()=>controller.abort(),15*60*1000);
+      let response;
+      try{
+        response=await fetch(target.href,{method:'PUT',body:file,
+          headers:signed.headers||{'Content-Type':file.type},
+          credentials:'omit',redirect:'error',signal:controller.signal});
+      }finally{clearTimeout(timer);}
+      if(!response.ok)throw new Error('직접 업로드가 실패했습니다. HTTP '+response.status);
+      latestUploadId=signed.upload_id;
+      // Step 3: HEAD-verified completion only queues analysis. No inline parsing.
+      const queued=await api(path+'/'+encodeURIComponent(latestUploadId)+'/complete',{method:'POST'});
+      status('교안을 저장하고 분석 대기열에 등록했습니다 ('+queued.status+'). 상태 확인 버튼으로 진행 상황을 조회할 수 있습니다.');
+      await readUploadStatus();
+    }catch(err){showError(err);}finally{busy(btn,false);}
+  }
+  async function refreshUploadStatus(){try{await readUploadStatus();}catch(err){showError(err);}}
   async function loadCandidates(){busy($('load-candidates'),true);try{
     let data;
     if(state.mode==='demo'){data=examples;}else{
@@ -176,7 +219,7 @@
     if(state.mode==='demo'){state.demoApproved=true;status('데모 승인 표시만 적용됐습니다. 암호학적 서명은 생성되지 않았습니다.');return;}
     const material=$('faculty-material').value;
     const items=checked.map(x=>({page:x.page,block_id:x.block_id,block_sha256:x.block_sha256}));
-    const result=await api('/v1/materials/'+encodeURIComponent(material)+'/approve',{method:'POST',body:{items}});
+    const result=await api('/v1/materials/'+encodeURIComponent(material)+'/approve',{method:'POST',body:{items,acknowledge_unprocessed_media:$('ack-unprocessed-media').checked}});
     status('서버의 교수자 서명 처리 결과: 승인 '+(result.approved_count||0)+'개 블록.');
     await refreshMaterials('faculty');
   }catch(err){showError(err);}finally{busy(btn,false);}}
@@ -205,6 +248,7 @@
   $('revise-form').addEventListener('submit',revise);
   $('course-form').addEventListener('submit',createCourse);
   $('upload-form').addEventListener('submit',upload);
+  $('upload-status-refresh').addEventListener('click',refreshUploadStatus);
   $('load-candidates').addEventListener('click',loadCandidates);
   $('approve-selected').addEventListener('click',approve);
   $('policy-form').addEventListener('submit',updatePolicy);

@@ -5,14 +5,14 @@
 ## 현재 지원 범위
 - **서버 신원 검증**: HS256 단기 액세스 토큰, DB에 존재하는 활성 사용자만 허용
 - **과목 ACL**: 교수자 자료 등록/승인, 학생은 자신이 등록된 과목의 코칭만 가능
-- **교안 업로드**: PDF/PPTX (25MB), SHA-256 확인 및 v1.6.2 ingest adapter
+- **대용량 교안 업로드**: 서버리스에서는 100MB 이하 PDF/PPTX를 Neon S3 presigned PUT으로 직접 업로드하고 별도 DB 작업에서 분석. 로컬용 구형 multipart는 유지
 - **교수자 서명**: v1.6.2 `verified_coaching.approve` 호출. 수업 AI 허용 플래그는 서명과 별개
 - **코칭**: Frozen runtime의 허용 근거 검색/미승인 페이지 차단/JSON 검증/타임아웃 Fallback
 - **데이터**: PostgreSQL 권장, 개발용 SQLite; 질문/수정 이력과 감사 이벤트 기록
 
-## 중요: Frozen Engine 의존성
+## 검증 엔진 경로
 
-이 저장소에는 v1.6.2 전체 엔진 코드 **아직 포함하지 않았습니다**. 검증이 끝난 원본 NIT 패키지를 서버의 비공개 경로에 설치하고 `NIT_ENGINE_ROOT`를 지정해야 합니다. 아래 구조가 존재해야 합니다.
+현재 개발 브랜치에는 `backend/nit_engine`에 NIT v1.6.2 소스가 이식되어 있습니다. 기존 `NIT_ENGINE_ROOT` 환경변수로 고정된 원본 엔진 경로를 지정할 수도 있습니다. 검증이 끝난 원본 NIT 패키지를 서버의 비공개 경로에 설치하고 `NIT_ENGINE_ROOT`를 지정해야 합니다. 아래 구조가 존재해야 합니다.
 
 ```text
 NIT_ENGINE_ROOT/
@@ -23,7 +23,7 @@ NIT_ENGINE_ROOT/
   runtime/gateway.py
 ```
 
-파일을 교체하거나 간이 파서로 우회하지 마세요. 엔진 파일이 없으면 업로드·승인·코칭 API는 **503 fail-closed**입니다. 기존 교안과 사용자 업로드 파일은 공개 GitHub 저장소에 올리지 않습니다.
+엔진 필수 파일을 확인하지 못하면 업로드·승인·코칭 API는 **503 fail-closed**입니다. 임의 간이 파서로 우회하지 마세요. 기존 교안과 사용자 업로드 파일은 공개 GitHub 저장소에 올리지 않습니다.
 
 ## Frozen engine 설치
 
@@ -59,7 +59,7 @@ uvicorn learningx.api:app --host 127.0.0.1 --port 8000
 
 토큰은 **운영자가 신원을 확인한 후** 안전한 환경에서 발급하는 파일럿용 임시 인증 방식입니다. 웹에서 자체 회원가입/토큰 발급은 지원하지 않습니다. 실제 서비스에는 학교 SSO/OIDC와 로그인 UI가 필요합니다. API 키 및 인증 토큰을 코드·브라우저·로그에 기록하지 마세요.
 
-PostgreSQL 환경에는 `postgresql+psycopg://...`을 사용하세요. 디스크에 업로드 파일을 보관하므로 Vercel의 일시적 파일시스템에 그대로 배포하면 안 됩니다. 영구 스토리지와 백그라운드 문서 파싱을 갖춘 서버(Render 등)에 배포하는 것이 적절합니다.
+PostgreSQL 환경에는 `postgresql+psycopg://...`을 사용하세요. 서버리스 배포는 영구 Neon Object Storage, 실행기 인증키 및 별도 분석 디스패처가 필요합니다. Vercel 함수의 /tmp를 영구 저장소로 간주하지 마세요.
 
 교수자/학생 웹 프론트엔드를 다른 Origin에 올린 경우 `NIT_CORS_ORIGINS=https://your-frontend.example`를 설정합니다. 와일드카드 Origin은 허용하지 않습니다.
 
@@ -73,7 +73,11 @@ PostgreSQL 환경에는 `postgresql+psycopg://...`을 사용하세요. 디스크
 | 과목 생성 | POST /v1/courses | 교수자 |
 | 학생 등록 | POST /v1/courses/{id}/members | 해당 과목 교수자 |
 | 수업 AI 정책 변경 | PUT /v1/courses/{id}/policy | 교수자 |
-| 교안 업로드 | POST /v1/courses/{id}/materials | 교수자 |
+| 직접 업로드 URL 발급 | POST /v1/courses/{id}/uploads/initiate | 교수자 |
+| 업로드 완료·분석 예약 | POST /v1/courses/{id}/uploads/{upload_id}/complete | 교수자 |
+| 분석 상태 조회 | GET /v1/courses/{id}/uploads/{upload_id} | 교수자 |
+| 분석 작업 실행 | POST /v1/internal/ingest/process | 별도 실행기 키 |
+| 기존 교안 업로드 | POST /v1/courses/{id}/materials | 로컬 전용, Vercel 410 |
 | 승인 후보 확인 | GET /v1/materials/{id}/candidates | 교수자 |
 | 근거 서명 승인 | POST /v1/materials/{id}/approve | 교수자 |
 | 질문 및 역질문 | POST /v1/courses/{id}/questions | 해당 과목 학생 |
@@ -99,3 +103,7 @@ python -m unittest discover -s tests -v
 4. TLS, 백업, 요청 한도, 업로드 악성파일 검사, 운영 로그 마스킹, SSO 준비
 
 **이 브랜치를 바로 공개 파일럿 운영 환경이라고 간주하면 안 됩니다.**
+
+## 파일럿 배포 전 검증
+
+개발 브랜치에서 [대용량 교안 P0 업로드·분석 계약](UPLOAD_ARCHITECTURE.md)을 구현 중입니다. **Python Vercel Queues 디스패치·구독 코드를 추가했으며, 배포·실제 메시지 전달은 검증되지 않았습니다.** 오디오 미분석 PPTX의 근거 승인에는 교수자의 명시적 고지가 필요합니다. 32.9MB 실물 PPTX, 367쪽 PDF, 실제 Neon 브라우저 PUT, 워커 timeout 복구, 모델 호출 품질 등 실환경 검증을 완료해야 합니다.

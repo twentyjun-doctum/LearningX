@@ -1,0 +1,75 @@
+{
+  "schema": "learningx_user_supplied_golden_v1",
+  "provenance": "User-reported independent inspection of original PPTX XML; original file was not provided to this agent; not automatically engine-generated",
+  "source_subject": "집단극단화 PPTX",
+  "source_bytes_approx": 32900000,
+  "audio": {
+    "expected_count": 13,
+    "duration_seconds_approx": 1477.9,
+    "slide_pages": [
+      1,
+      2,
+      4,
+      7,
+      8,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17
+    ]
+  },
+  "playback_controls": {
+    "expected_count": 13,
+    "reused_icon": "image1.png",
+    "slide_pages": [
+      1,
+      2,
+      4,
+      7,
+      8,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17
+    ]
+  },
+  "educational_visuals": {
+    "slide_pages": [
+      8
+    ],
+    "vision_candidate_pages": [
+      8
+    ]
+  },
+  "wingdings_arrows": {
+    "unicode": "U+F0E0",
+    "font": "Wingdings",
+    "count": 14,
+    "slide_pages": [
+      3,
+      9,
+      11,
+      12,
+      14,
+      16,
+      17
+    ],
+    "use_as_bullets": 0,
+    "normalized": "→"
+  },
+  "lecture": {
+    "session_number": 1,
+    "marker": "1차시",
+    "location": "filename_middle_only",
+    "body_marker_count": 0
+  },
+  "note": "Actual PPTX required for literal original-file asserts and duration measurement. Synthetic unit tests do not constitute original acceptance."
+}

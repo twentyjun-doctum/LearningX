@@ -32,6 +32,13 @@ Vercel → learningx-api → Settings → Environment Variables에서 Production
 | `NIT_LLM_BASE_URL` | 본인의 FreeLLMAPI 라우터 OpenAI-compatible base URL (예: `https://<router>/v1`) |
 | `NIT_LLM_MODEL` | `auto` (라우터가 지원하는 모델) |
 | `NIT_LLM_API_KEY` | FreeLLMAPI Keys 페이지에서 발급한 현재 유효한 통합 API 키 |
+| `NIT_WORKER_SECRET` | 기존 내부 워커 HTTP 엔드포인트용 32자 이상 별도 비밀키 (Queues 비공개 구독자 자체에서는 불필요) |
+| `NIT_QUEUE_ENABLED` | `1` (Vercel 배포 시 Queues 자동 발행 활성화) |
+| `NIT_WORKER_BACKEND` | `vercel_queue` (다른 작업 디스패처와 혼용 금지) |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | Neon Object Storage 브랜치 발급 자격증명 |
+| `AWS_ENDPOINT_URL_S3` | Neon 프로젝트 `learningx-pilot`의 branch S3 endpoint |
+| `AWS_REGION` | `ap-southeast-1` |
+| `NIT_STORAGE_BUCKET` | `learningx-private-lessons` (Private) |
 
 **Vercel 정적 프론트엔드 환경변수로 비밀키를 보내지 마세요.** 프론트는 `/app.html` 서버 연결 모드에서 백엔드 URL과 **교수자/학생별 단기 JWT**만 메모리로 사용합니다.
 
@@ -48,14 +55,19 @@ Vercel → learningx-api → Settings → Environment Variables에서 Production
 
 환경변수 변경은 새로운 배포를 해야 적용됩니다. SQLite가 실수로 사용되지 않도록 Vercel 서버 런타임에서는 `DATABASE_URL`이 없으면 서버 초기화를 거부합니다.
 
-## 현재의 강제 차단 및 향후 필수 작업
+## 교안 100MB 직접 업로드 및 비동기 분석
 
-**이 PR은 Vercel API + Neon 연결의 배포 준비이지, 교안 기반 AI 파일럿 전체 완성이 아닙니다.**
+현재 개발 브랜치는 기존 Vercel 4.5MB 요청 본문 한도를 우회하기 위해 **서명 URL을 이용한 직접 업로드**를 구현했습니다. 상세 계약: [UPLOAD_ARCHITECTURE.md](UPLOAD_ARCHITECTURE.md).
 
-- Vercel Functions 파일시스템은 읽기 전용이고 `/tmp`만 임시로 쓸 수 있으므로, 현재 업로드 API는 `503 Private durable lesson storage is required for Vercel`로 **의도적으로 차단**됩니다.
-- 검증된 NIT v1.6.2 + Pilot Patch 교안 엔진은 현재 저장소/배포에 포함되지 않아, 교수자 서명과 코칭 관련 API를 아직 사용할 수 없습니다.
-- 다음 구현은 **비공개 영구 객체 저장소**(예: Neon Object Storage 또는 Vercel Blob)를 통해 원본 PDF/PPTX와 Canonical JSON 및 서명 아티팩트를 저장/조회하는 어댑터입니다. 백엔드가 서명 파일을 복원하고 검증해야 코칭을 활성화할 수 있습니다.
-- 서버리스 함수 콜드 스타트가 0초인 것은 아닙니다. Render 무료 인스턴스의 장시간 재기동 대기를 피하면서, 온디맨드 FastAPI를 운영하는 선택입니다.
-- 인증 토큰과 학생 데이터가 있으므로 **Oil&Fat 기존 Vercel API 프로젝트와 결합하지 않습니다.** 동일 Vercel 계정에서 별도 `learningx-api` 프로젝트로 격리합니다.
+- **교수자:** `POST /v1/courses/{id}/uploads/initiate` → Neon S3에 브라우저 직접 `PUT` → `POST /v1/courses/{id}/uploads/{upload_id}/complete` (202/QUEUED).
+- **별도 워커:** `POST /v1/internal/ingest/process`는 `NIT_WORKER_SECRET`으로 인증하고 DB 리스 기반으로 한 건씩 분석합니다. **Vercel Queues Python 구독자 코드가 구현되어 있습니다. Vercel 프로젝트 생성 및 실제 큐 등록·실동작은 아직 미검증입니다.** 작업 상태는 `GET /v1/courses/{id}/uploads/{upload_id}`에서 확인합니다.
+- **교안 산출물:** 비공개 Neon Object Storage `learningx-private-lessons`에 원문, Canonical JSON, 교수자 서명 산출물을 저장하고 요청마다 SHA-256 무결성을 확인합니다.
+- **PPTX:** 파서 감사는 PDF arbitration 비교가 해당하지 않음을 보고하고, 오디오/내레이션을 처리하지 않았다면 교수자에게 고지합니다. 내레이션 포함 교안의 근거 승인에는 명시적 확인이 필요합니다.
+- **기존 Multipart:** Vercel의 `POST /v1/courses/{id}/materials`는 410으로 응답해 직접 업로드를 안내합니다.
+- **검증 엔진:** 기존 NIT v1.6.2 소스를 `backend/nit_engine`에 이식했으며 엔진 가용성을 확인한 후 사용합니다. 실모델 학습 품질 검증은 별도입니다.
+
+현재 구현은 **코드 및 모의 통합 테스트 단계**입니다. 실제 32.9MB PPTX·367쪽 PDF 업로드, Neon 브라우저 CORS, 대용량 처리 시간, FreeLLMAPI 실연동, Vercel Queues 실제 메시지 전달, Vercel 서버 배포 및 HTTPS E2E는 아직 통과되지 않았습니다. 운영 파일럿 전 검증 필수입니다.
+
+서버리스 함수 콜드 스타트는 0초가 아닙니다. 기존 Oil&Fat Vercel 프로젝트 및 LearningX 프론트엔드 프로젝트와 **별도 `learningx-api` 프로젝트**를 사용합니다.
 
 참고: [Vercel FastAPI](https://vercel.com/docs/frameworks/backend/fastapi), [Vercel Python Runtime](https://vercel.com/docs/functions/runtimes/python), [Functions Limitations](https://vercel.com/docs/functions/limitations).

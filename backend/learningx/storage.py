@@ -72,10 +72,33 @@ class Revision(Base):
     text: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda:datetime.now(timezone.utc), nullable=False)
 
+
+class IngestJob(Base):
+    """Upload is separate from parsing. No background work runs in a request."""
+    __tablename__ = "ingest_jobs"
+    id: Mapped[str] = mapped_column(String(64), primary_key=True, default=uid)
+    course_id: Mapped[str] = mapped_column(ForeignKey("courses.id"), nullable=False, index=True)
+    uploaded_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    filename: Mapped[str] = mapped_column(String(260), nullable=False)
+    media_type: Mapped[str] = mapped_column(String(120), nullable=False)
+    expected_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_key: Mapped[str] = mapped_column(String(380), unique=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(28), default="AWAITING_UPLOAD", nullable=False, index=True)
+    material_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    file_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    coverage_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda:datetime.now(timezone.utc), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda:datetime.now(timezone.utc), onupdate=lambda:datetime.now(timezone.utc), nullable=False)
+
+
 DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
     # Never silently write SQLite into an ephemeral serverless filesystem.
-    if os.getenv("NIT_SERVERLESS_RUNTIME") == "1" or os.getenv("RENDER_SERVICE_ID"):
+    if (os.getenv("NIT_SERVERLESS_RUNTIME") == "1" or os.getenv("RENDER_SERVICE_ID")
+            or os.getenv("NIT_HOSTED_RUNTIME") == "1"):
         raise RuntimeError("DATABASE_URL must be configured for hosted LearningX API")
     DB_URL = "sqlite:///./learningx_dev.sqlite3"
 if DB_URL.startswith("postgres://"):
