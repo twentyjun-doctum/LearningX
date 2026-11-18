@@ -262,10 +262,13 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
     s = ClassSession(course_id=course_id, material_id=m.id, join_code=_new_code(db), created_by=user.id)
     db.add(s)
     db.flush()
-    db.add(LiveSlide(session_id=s.id, page=first, total=total, version=uid(), content=json.dumps(content)))
+    first_slide = LiveSlide(session_id=s.id, page=first, total=total, version=uid(), content=json.dumps(content))
+    db.add(first_slide)
     _audit(db, user.id, course_id, "session_opened", m.id)
     db.commit()
-    return _public_session(db, s, faculty=True)
+    return {**_public_session(db, s, faculty=True),
+            "initial_live": {"status": s.status, "slide": {**_slide_metadata(first_slide), "visible_pages": pages},
+                             "index": []}}
 
 
 @router.get("/courses/{course_id}/sessions")
@@ -321,6 +324,15 @@ def _live_access(db, session_id, user):
     return current, faculty
 
 
+def _slide_metadata(slide, version=""):
+    if slide is None:
+        return None
+    metadata = {"page": slide.page, "total": slide.total, "version": slide.version}
+    if version != slide.version:
+        metadata.update(json.loads(slide.content))
+    return metadata
+
+
 def _snapshot(db, session_id, user, version):
     current, faculty = _live_access(db, session_id, user)
     if current.status == "CLOSED":
@@ -335,13 +347,9 @@ def _snapshot(db, session_id, user, version):
         query = query.filter(SessionQuestion.student_id == user.id)
     index = [{"id": row.id, "level": row.level, "page": row.page}
              for row in query.order_by(SessionQuestion.created_at.desc()).limit(500)]
-    snapshot = None
-    if slide:
-        snapshot = {"page": slide.page, "total": slide.total, "version": slide.version}
-        if version != slide.version:
-            snapshot.update(json.loads(slide.content))
-            if faculty and snapshot.get("pdf"):
-                snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
+    snapshot = _slide_metadata(slide, version)
+    if faculty and snapshot and snapshot.get("pdf"):
+        snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
     return {"status": current.status, "slide": snapshot, "index": index}
 
 
@@ -539,7 +547,8 @@ def join(data: JoinRequest, request: Request, response: Response, db: Session = 
     db.commit()
     response.headers["Cache-Control"] = "no-store"
     return {"access_token": issue_token(student.id, minutes=STUDENT_TOKEN_MINUTES, session_id=s.id),
-            "session": _public_session(db, s)}
+            "session": _public_session(db, s),
+            "initial_live": {"status": s.status, "slide": _slide_metadata(db.get(LiveSlide, s.id)), "index": []}}
 
 
 @router.post("/sessions/{session_id}/questions", status_code=201)

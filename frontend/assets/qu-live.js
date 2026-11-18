@@ -3,7 +3,7 @@
   const {el, LEVEL} = window.QU;
   const pdfBase = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
   let pdfLibrary;
-  function loadPdf(bytes) {
+  function warmPdf() {
     pdfLibrary ??= import(pdfBase + 'build/pdf.min.mjs').then(lib => {
       lib.GlobalWorkerOptions.workerSrc = pdfBase + 'build/pdf.worker.min.mjs';
       return lib;
@@ -11,7 +11,11 @@
       pdfLibrary = null;
       throw err;
     });
-    return pdfLibrary.then(async lib => ({
+    return pdfLibrary;
+  }
+
+  function loadPdf(bytes) {
+    return warmPdf().then(async lib => ({
       lib,
       doc: await lib.getDocument({
         data: bytes, isEvalSupported: false, useWasm: false, enableXfa: false,
@@ -20,10 +24,10 @@
     }));
   }
 
-  async function renderPage({lib, doc}, number, width) {
+  async function renderPage({lib, doc}, number, width, height) {
     const page = await doc.getPage(number);
     const natural = page.getViewport({scale: 1});
-    const scale = Math.min(width / natural.width, innerHeight * .75 / natural.height);
+    const scale = Math.min(width / natural.width, height / natural.height);
     const viewport = page.getViewport({scale});
     const ratio = Math.min(devicePixelRatio || 1, 2);
     const canvas = el('canvas', {width: Math.ceil(viewport.width * ratio), height: Math.ceil(viewport.height * ratio),
@@ -40,7 +44,11 @@
     return frame;
   }
 
-  window.QU.createLiveView = ({api, session, panel, faculty = false, onState, onQuestion}) => {
+  // Start loading the renderer during entry/review so opening a slide can overlap
+  // authentication and network I/O with module loading.
+  warmPdf().catch(() => {});
+
+  window.QU.createLiveView = ({api, session, panel, faculty = false, initial, localFile, onState, onQuestion}) => {
     const page = panel.querySelector('[data-live-page]');
     const content = panel.querySelector('[data-live-content]');
     const index = panel.querySelector('[data-live-index]');
@@ -48,16 +56,16 @@
     const path = '/v1/sessions/' + encodeURIComponent(session) + '/live';
     const frames = new Map();
     let deck = null;
-    let slide = null;
+    let slide = initial?.slide ?? null;
     let selected = null;
     let navigation = null;
-    let visiblePages = [];
+    let visiblePages = slide?.visible_pages ?? [];
     let displayed = null;
     let stopped = false;
     let timer;
     let indexKey = '';
     let stamp;
-    let items = [];
+    let items = initial?.index ?? [];
     let renderId = 0;
 
     function cached(key, make) {
@@ -71,7 +79,8 @@
       return frame;
     }
 
-    const width = () => Math.max(180, Math.floor(content.clientWidth || panel.clientWidth || 320));
+    const width = () => Math.max(1, Math.floor(content.clientWidth || panel.clientWidth || 320));
+    const height = () => Math.floor(document.fullscreenElement === panel ? innerHeight : innerHeight * .75);
 
     function paintIndex() {
       const visible = items.filter(item => item.page === displayed);
@@ -85,13 +94,13 @@
       }, LEVEL[item.level])));
     }
 
-    function studentFrame(target, number, w) {
-      return cached('page:' + number + ':' + w, async () => {
+    function pageFrame(target, number, w, h) {
+      return cached('page:' + number + ':' + w + ':' + h, async () => {
         const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
         const res = await api(url, {raw: true, timeout: 12000});
         const pdf = await loadPdf(await res.arrayBuffer());
         try {
-          return await renderPage(pdf, 1, w);
+          return await renderPage(pdf, 1, w, h);
         } finally {
           await pdf.doc.destroy();
         }
@@ -108,17 +117,18 @@
         return;
       }
       const w = width();
+      const h = height();
       let frame;
       try {
         if (deck) {
-          frame = await cached('deck:' + target.page + ':' + w, () => renderPage(deck, target.page, w));
-        } else if (!faculty && target.pdf) {
+          frame = await cached('deck:' + target.page + ':' + w + ':' + h, () => renderPage(deck, target.page, w, h));
+        } else if (target.pdf && (!faculty || !localFile)) {
           try {
-            frame = await studentFrame(target, target.page, w);
+            frame = await pageFrame(target, target.page, w, h);
           } catch (err) {
             if (err.status !== 409 || stopped || id !== renderId) throw err;
             // An in-flight preload may have used the previous slide version.
-            frame = await studentFrame(target, target.page, w);
+            frame = await pageFrame(target, target.page, w, h);
           }
         }
       } catch (err) {
@@ -138,12 +148,12 @@
       if (deck) {
         for (const number of [target.after ?? displayed + 1, target.before ?? displayed - 1]) {
           if (number > 0 && number <= deck.doc.numPages) {
-            cached('deck:' + number + ':' + w, () => renderPage(deck, number, w)).catch(() => {});
+            cached('deck:' + number + ':' + w + ':' + h, () => renderPage(deck, number, w, h)).catch(() => {});
           }
         }
-      } else if (target.pdf) {
+      } else if (!faculty && target.pdf) {
         for (const number of [target.after, target.before]) {
-          if (number) studentFrame(target, number, w).catch(() => {});
+          if (number) pageFrame(target, number, w, h).catch(() => {});
         }
       }
     }
@@ -180,9 +190,9 @@
     }
 
     function resize() {
-      if (!deck || stopped) return;
-      const number = selected ?? slide?.page ?? displayed;
-      if (number) display({page: number, total: deck.doc.numPages});
+      if (stopped || !slide) return;
+      if (deck && selected) display({page: selected, total: deck.doc.numPages});
+      else display(slide);
     }
 
     if (faculty) {
@@ -212,12 +222,16 @@
     page.textContent = '송출 대기';
     content.replaceChildren();
     index.replaceChildren();
+    status.textContent = '교안 화면을 준비하는 중입니다.';
+    if (slide && (!faculty || !localFile)) display(slide);
     tick();
     if (faculty) {
-      api(path + '/document', {raw: true}).then(res => res.arrayBuffer()).then(loadPdf).then(pdf => {
+      const remote = () => api(path + '/document', {raw: true}).then(res => res.arrayBuffer()).then(loadPdf);
+      const loading = localFile ? localFile.arrayBuffer().then(loadPdf).catch(remote) : remote();
+      loading.then(pdf => {
         if (stopped) return pdf.doc.destroy();
         deck = pdf;
-        if (slide) display(slide);
+        if (slide && displayed !== slide.page) display(slide);
         onState({slide, total: deck.doc.numPages});
       }).catch(() => { if (!stopped) status.textContent = '원본 교안 화면을 불러오지 못했습니다. 수업에 다시 접속해 주세요.'; });
     }
