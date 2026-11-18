@@ -28,7 +28,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, QuestionSlide, build_snapshot, notify, page_pdf, revision, source_pdf, visible_pages, wait_for_update
+from .live_slides import LiveSlide, QuestionSlide, build_snapshot, notify, page_pdf, revision, source_pdf, wait_for_update
 from .security import actor, issue_token, require_course, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
@@ -249,13 +249,6 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
     with private_store.material_workspace(m) as out:
         if nit.verified_count(out) <= 0:
             raise HTTPException(409, "Approve evidence for this material before opening a session")
-    pages = visible_pages(m)
-    if not pages:
-        raise HTTPException(422, "No visible pages are available")
-    first = pages[0]
-    total, content = build_snapshot(m, first)
-    if m.filename.lower().endswith(".pptx"):
-        source_pdf(m)
     for old in db.query(ClassSession).filter(ClassSession.course_id == course_id,
                                              ClassSession.status != "CLOSED").all():
         old.status = "CLOSED"
@@ -263,7 +256,6 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
     s = ClassSession(course_id=course_id, material_id=m.id, join_code=_new_code(db), created_by=user.id)
     db.add(s)
     db.flush()
-    db.add(LiveSlide(session_id=s.id, page=first, total=total, version=uid(), content=json.dumps(content)))
     _audit(db, user.id, course_id, "session_opened", m.id)
     db.commit()
     return _public_session(db, s, faculty=True)
@@ -301,12 +293,12 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
 
 
 @router.get("/sessions/{session_id}/live")
-async def live_snapshot(session_id: str, response: Response, version: str = "",
+async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
                         after: str | None = None, db: Session = Depends(session), user: User = Depends(actor)):
     if after is not None and after == revision(session_id):
         await run_in_threadpool(_live_access, db, session_id, user)
         await run_in_threadpool(db.rollback)
-        await wait_for_update(session_id, after)
+        await wait_for_update(session_id, after, request)
     stamp = revision(session_id)
     response.headers["Cache-Control"] = "no-store"
     snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version)
@@ -341,8 +333,6 @@ def _snapshot(db, session_id, user, version):
         snapshot = {"page": slide.page, "total": slide.total, "version": slide.version}
         if version != slide.version:
             snapshot.update(json.loads(slide.content))
-            if faculty and snapshot.get("pdf"):
-                snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
     return {"status": current.status, "slide": snapshot, "index": index}
 
 
@@ -352,41 +342,22 @@ def live_document(session_id: str, db: Session = Depends(session), user: User = 
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     material = db.get(Material, current.material_id)
-    pdf = source_pdf(material)
-    slide = db.get(LiveSlide, session_id)
-    # Bring sessions opened before automatic sharing onto the same page format.
-    if slide is None or "after" not in json.loads(slide.content):
-        db.refresh(current, with_for_update=True)
-        if current.status == "CLOSED":
-            raise HTTPException(409, "Class has ended")
-        slide = db.get(LiveSlide, session_id, populate_existing=True)
-        if slide is None or "after" not in json.loads(slide.content):
-            pages = visible_pages(material)
-            if not pages:
-                raise HTTPException(422, "No visible pages are available")
-            number = slide.page if slide and slide.page in pages else pages[0]
-            total, content = build_snapshot(material, number)
-            db.merge(LiveSlide(session_id=session_id, page=number, total=total, version=uid(),
-                               content=json.dumps(content)))
-            db.commit()
-            notify(session_id)
-    return _pdf_response(pdf)
+    if not material.filename.lower().endswith(".pdf"):
+        raise HTTPException(404, "No PDF for this lesson")
+    return _pdf_response(source_pdf(material))
 
 
 @router.get("/sessions/{session_id}/live/page/{version}")
-def live_page(session_id: str, version: str, page: int | None = None, db: Session = Depends(session), user: User = Depends(actor)):
+def live_page(session_id: str, version: str, db: Session = Depends(session), user: User = Depends(actor)):
     current, _ = _live_access(db, session_id, user)
     slide = db.get(LiveSlide, session_id)
     if current.status == "CLOSED" or not slide or slide.version != version:
         raise HTTPException(409, "This page is no longer being shared")
-    content = json.loads(slide.content)
-    if not content.get("pdf"):
+    if not json.loads(slide.content).get("pdf"):
         raise HTTPException(404, "No PDF for this page")
     material = db.get(Material, current.material_id)
-    target = slide.page if page is None else page
-    if target not in (slide.page, content.get("before"), content.get("after")):
-        raise HTTPException(403, "This page is outside the active slide window")
-    return _pdf_response(page_pdf(material, target))
+    page = slide.page
+    return _pdf_response(page_pdf(material, page))
 
 
 def _pdf_response(content):
@@ -410,7 +381,7 @@ def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session
                        content=json.dumps(content, ensure_ascii=False)))
     db.commit()
     notify(session_id)
-    return {"page": data.page, "total": total, **content}
+    return {"page": data.page, "total": total}
 
 
 @router.get("/sessions/{session_id}/board")

@@ -1,13 +1,10 @@
-"""Page snapshots for live classrooms. Keep page assets separate from navigation state."""
+"""Page snapshots for live classrooms. Only the currently shared page is served."""
 import asyncio
 from collections import OrderedDict
 from functools import lru_cache
 from threading import Lock
 from types import SimpleNamespace
 import json
-from pathlib import Path
-import subprocess
-from tempfile import TemporaryDirectory
 
 from fastapi import HTTPException
 from sqlalchemy import ForeignKey, Integer, String, Text
@@ -36,7 +33,6 @@ class QuestionSlide(Base):
 _revisions = OrderedDict()
 _revision_lock = Lock()
 _pdf_lock = Lock()
-_waiters = {}
 
 
 def revision(session_id):
@@ -46,68 +42,32 @@ def revision(session_id):
 
 def notify(session_id):
     with _revision_lock:
-        for loop, event in _waiters.get(session_id, ()):
-            loop.call_soon_threadsafe(event.set)
         _revisions[session_id] = uid()
         _revisions.move_to_end(session_id)
         if len(_revisions) > 1024:
             _revisions.popitem(last=False)
 
 
-async def wait_for_update(session_id, after):
+async def wait_for_update(session_id, after, request):
+    # Keep no database transaction open while waiting. The deadline also
+    # refreshes state written by another API process.
     loop = asyncio.get_running_loop()
-    event = asyncio.Event()
-    waiter = (loop, event)
-    with _revision_lock:
-        if _revisions.get(session_id, "") != after:
-            return
-        _waiters.setdefault(session_id, set()).add(waiter)
-    try:
-        await asyncio.wait_for(event.wait(), timeout=2.5)
-    except TimeoutError:
-        pass
-    finally:
-        with _revision_lock:
-            waiters = _waiters[session_id]
-            waiters.remove(waiter)
-            if not waiters:
-                del _waiters[session_id]
+    deadline = loop.time() + 2.5
+    while revision(session_id) == after and loop.time() < deadline:
+        await asyncio.sleep(0.08)
+        if await request.is_disconnected():
+            break
 
 
 def _identity(material):
-    return material.id, material.course_id, material.out_dir, Path(material.filename).suffix.lower()
+    return material.id, material.course_id, material.out_dir
 
 
 @lru_cache(maxsize=2)
 def _source(identity):
-    material_id, course_id, out_dir, _ = identity
-    record = SimpleNamespace(id=material_id, course_id=course_id, out_dir=out_dir)
-    limit = 40 * 1024 * 1024
-    if identity[3] == ".pdf":
-        return read_material_artifact(record, "source.pdf", limit)
-    raw = read_material_artifact(record, "source.pptx", limit)
-    with TemporaryDirectory(prefix="learningx-live-pptx-") as folder:
-        root = Path(folder)
-        pptx = root / "lesson.pptx"
-        pptx.write_bytes(raw)
-        try:
-            subprocess.run([
-                "soffice", f"-env:UserInstallation={(root / 'profile').as_uri()}", "--headless",
-                "--convert-to", 'pdf:impress_pdf_Export:{"ExportHiddenSlides":{"type":"boolean","value":"true"}}',
-                "--outdir", folder, str(pptx),
-            ], check=True, timeout=75, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            with (root / "lesson.pdf").open("rb") as output:
-                pdf = output.read(limit + 1)
-        except (OSError, subprocess.SubprocessError) as exc:
-            raise HTTPException(503, "PPTX preview could not be generated") from exc
-        if len(pdf) > limit:
-            raise HTTPException(413, "PPTX preview is too large")
-        import pymupdf
-
-        with _pdf_lock, pymupdf.open(stream=pdf, filetype="pdf") as doc:
-            if len(doc) != max(_pages(identity), default=0):
-                raise HTTPException(503, "PPTX preview slide numbering does not match the lesson")
-        return pdf
+    material_id, course_id, out_dir = identity
+    return read_material_artifact(SimpleNamespace(id=material_id, course_id=course_id, out_dir=out_dir),
+                                  "source.pdf", 40 * 1024 * 1024)
 
 
 def source_pdf(material):
@@ -116,25 +76,30 @@ def source_pdf(material):
 
 @lru_cache(maxsize=8)
 def _pages(identity):
-    material_id, course_id, out_dir, _ = identity
+    material_id, course_id, out_dir = identity
     material = SimpleNamespace(id=material_id, course_id=course_id, out_dir=out_dir)
     raw = read_material_artifact(material, "parsed/document.json", 24 * 1024 * 1024)
     pages = json.loads(raw)["pages"]
-    return {entry["page"]: bool(entry.get("hidden_slide")) for entry in pages}
-
-
-def visible_pages(material):
-    return sorted(page for page, hidden in _pages(_identity(material)).items() if not hidden)
+    return {
+        entry["page"]: (
+            bool(entry.get("hidden_slide")),
+            "\n".join(block["text"] for block in entry["blocks"]
+                       if isinstance(block.get("text"), str)
+                       and block.get("origin") in ("native", "native_fallback")
+                       and block.get("type") != "notes"
+                       and block.get("content_role") != "teacher_note")[:12000],
+        )
+        for entry in pages
+    }
 
 
 def build_snapshot(material, page):
     pages = _pages(_identity(material))
-    if page not in pages or pages[page]:
+    if page not in pages or pages[page][0]:
         raise HTTPException(422, "Slide does not exist or is hidden")
     # Only metadata is saved on navigation. The browser requests page bytes
     # separately and retains pages it has already rendered.
-    return max(pages), {"pdf": True, "before": max((n for n in pages if n < page and not pages[n]), default=None),
-                        "after": min((n for n in pages if n > page and not pages[n]), default=None)}
+    return max(pages), {"pdf": material.filename.lower().endswith(".pdf"), "text": pages[page][1]}
 
 
 @lru_cache(maxsize=6)
