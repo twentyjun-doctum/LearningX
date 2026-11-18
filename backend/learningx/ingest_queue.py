@@ -180,6 +180,20 @@ async def retry_upload(course_id:str,upload_id:str,db:Session=Depends(session),u
 
 def _claim(db,job_id=None):
     now=datetime.now(timezone.utc)
+    # Polling without a job ID must also close exhausted, expired leases.
+    expired = db.query(IngestJob).filter(
+        IngestJob.status == "RUNNING",
+        IngestJob.lease_until < now,
+        IngestJob.attempts >= MAX_ATTEMPTS,
+    )
+    if job_id is not None:
+        expired = expired.filter(IngestJob.id == job_id)
+    expired.update({
+        IngestJob.status: "FAILED",
+        IngestJob.error_code: "WORKER_TIMEOUT",
+        IngestJob.lease_until: None,
+    }, synchronize_session=False)
+    db.commit()
     query=db.query(IngestJob)
     if job_id is not None:
         query=query.filter(IngestJob.id==job_id)
@@ -261,7 +275,19 @@ def process_next_job(job_id=None):
                 stage = "publish"
                 location=store.publish_new(root,row.course_id,row.id)
                 stage = "database_commit"
-                coverage=document.get("media_coverage",{})
+                coverage=dict(document.get("media_coverage",{}))
+                coverage["native_extraction"] = "COMPLETE"
+                coverage["vision"] = document.get("vision_execution", {
+                    "status": "UNKNOWN", "completed_jobs": 0,
+                })
+                coverage["ocr"] = {
+                    "status": "PENDING" if any(
+                        page.get("ocr_state") in ("queued", "failed")
+                        for page in document.get("pages", [])
+                    ) else "NOT_REQUIRED",
+                }
+                coverage["semantic_analysis"] = "NOT_RUN"
+                coverage["faculty_approval_required"] = True
                 if ext==".pptx":
                     coverage.setdefault("audio_status","UNKNOWN_NOT_VERIFIED")
                     coverage.setdefault("warning","PPTX narration was not transcribed")
