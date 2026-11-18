@@ -73,3 +73,87 @@ for (const [hostname, query, expected] of [
  assert.equal(calls[0].options.headers.Authorization,'Bearer test-only-token');
 }
 console.log('OK: API origin confinement protects invite codes and tokens');
+
+{
+ const liveSource = fs.readFileSync(path.join(root,'assets/qu-live.js'),'utf8');
+ const stubbed = liveSource.replace("import(pdfBase + 'build/pdf.min.mjs')", 'loadFixtureRenderer()');
+ assert.notEqual(stubbed, liveSource);
+ function node() {
+  return {children:[], style:{setProperty(){}}, clientWidth:640, textContent:'',
+   append(...children){this.children.push(...children);},
+   replaceChildren(...children){this.children=children;},
+   querySelector(){return null;}, addEventListener(){}, removeEventListener(){}};
+ }
+ const children = new Map();
+ const panel = node();
+ panel.querySelector = key => {
+  if (key === '[data-live-confused]' || key === '[data-live-ask]') return null;
+  if (!children.has(key)) children.set(key,node());
+  return children.get(key);
+ };
+ const response = {arrayBuffer: async () => new ArrayBuffer(10)};
+ const error = status => Object.assign(new Error('fixture HTTP '+status),{status});
+ const slide = (page, version, after) => ({page, version, after, total:9, pdf:true});
+ let latest = slide(1,'v1',2);
+ let releaseOld;
+ let failedLatest = false;
+ const oldPrefetch = new Promise(resolve => { releaseOld = resolve; });
+ const calls = [];
+ let lastRendered = null;
+ const content = panel.querySelector('[data-live-content]');
+ const replace = content.replaceChildren.bind(content);
+ content.replaceChildren = (...nodes) => {
+  replace(...nodes);
+  if (nodes.length) lastRendered = panel.querySelector('[data-live-page]').textContent;
+ };
+ let clock = 0;
+ const api = async path => {
+  const url = new URL(path,'https://fixture.local');
+  if (!url.pathname.includes('/page/')) {
+   await new Promise(resolve => setTimeout(resolve,8));
+   return {status:'OPEN', slide:latest, index:[], revision:latest.version};
+  }
+  calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
+  if (url.pathname.endsWith('/v1') && url.searchParams.get('page') === '2') return oldPrefetch;
+  if (url.pathname.endsWith('/v4') && !failedLatest) {
+   failedLatest = true;
+   throw error(503);
+  }
+  return response;
+ };
+ const page = {getViewport:({scale})=>({width:100*scale,height:100*scale,scale}),
+  render:()=>({promise:Promise.resolve()}),streamTextContent(){}};
+ const ctx = vm.createContext({
+  window:{QU:{el:node,LEVEL:{}},addEventListener(){},removeEventListener(){}},
+  document:{addEventListener(){},removeEventListener(){}}, innerHeight:720, devicePixelRatio:1,
+  URLSearchParams,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
+  loadFixtureRenderer: async ()=>({
+   GlobalWorkerOptions:{},TextLayer:class {async render(){}},
+   getDocument:()=>({promise:Promise.resolve({getPage:async()=>page,destroy:async()=>{},numPages:1})}),
+  }),
+ });
+ vm.runInContext(stubbed,ctx);
+ const view = ctx.window.QU.createLiveView({api,session:'fixture',panel,
+  initial:{status:'OPEN',slide:latest,index:[]},onState(){},onQuestion(){}});
+ async function until(condition, label) {
+  const deadline = Date.now()+1500;
+  while (!condition() && Date.now()<deadline) await new Promise(resolve=>setTimeout(resolve,5));
+  assert.ok(condition(),label);
+ }
+ try {
+  await until(()=>calls.some(([v,p])=>v==='v1'&&p===2) && view.page()===1,'old prefetch remains in flight');
+  latest = slide(6,'v2',7);
+  await until(()=>calls.some(([v])=>v==='v2'),'student receives first rapid transition');
+  latest = slide(8,'v3',9);
+  latest = slide(2,'v4',3);
+  await until(()=>view.page()===2,'student retries the latest page without another teacher transition');
+  assert.equal(calls.filter(([v,p])=>v==='v4'&&p===2).length,2);
+  releaseOld(response);
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(lastRendered,'2 / 9','old prefetch does not overwrite the current page');
+ } finally {
+  releaseOld(response);
+  view.stop();
+ }
+ console.log('OK: live slide follows rapid page changes and retries temporary failures');
+}

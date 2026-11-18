@@ -72,6 +72,8 @@
     let indexVersion;
     let items = initial?.index ?? [];
     let renderId = 0;
+    let activeRender = null;
+    let retryAfter = 0;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -221,7 +223,8 @@
         pageFiles.set(number, retained);
         return Promise.resolve(retained);
       }
-      if (downloads.has(number)) return downloads.get(number);
+      const key = target.version + ":" + number;
+      if (downloads.has(key)) return downloads.get(key);
       const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
       const pending = api(url, {raw: true, timeout: 12000}).then(res => res.arrayBuffer()).then(bytes => {
         if (!stopped && bytes.byteLength <= pageCacheLimit) {
@@ -234,13 +237,13 @@
           retainedBytes += bytes.byteLength;
         }
         return bytes;
-      }).finally(() => downloads.delete(number));
-      downloads.set(number, pending);
+      }).finally(() => downloads.delete(key));
+      downloads.set(key, pending);
       return pending;
     }
 
     function pageFrame(target, number, w, h, onBytes) {
-      return cached('page:' + number + ':' + w + ':' + h, async () => {
+      return cached('page:' + target.version + ':' + number + ':' + w + ':' + h, async () => {
         const bytes = await pageBytes(target, number);
         onBytes?.();
         // PDF.js transfers the input to its worker. Keep the cached bytes intact.
@@ -251,6 +254,15 @@
           await pdf.doc.destroy();
         }
       });
+    }
+
+    function follow(target) {
+      const render = display(target).finally(() => {
+        if (activeRender !== render) return;
+        activeRender = null;
+        retryAfter = performance.now() + 350;
+      });
+      activeRender = render;
     }
 
     async function display(target) {
@@ -274,13 +286,7 @@
         if (deck) {
           frame = await cached('deck:' + target.page + ':' + w + ':' + h, () => renderPage(deck, target.page, w, h));
         } else if (target.pdf && (!faculty || !localFile)) {
-          try {
-            frame = await pageFrame(target, target.page, w, h, preloadNext);
-          } catch (err) {
-            if (err.status !== 409 || stopped || id !== renderId) throw err;
-            // An in-flight preload may have used the previous slide version.
-            frame = await pageFrame(target, target.page, w, h, preloadNext);
-          }
+          frame = await pageFrame(target, target.page, w, h, preloadNext);
         }
       } catch (err) {
         if (stopped || id !== renderId || err.status === 409) return;
@@ -334,7 +340,13 @@
         if (data.index) items = data.index;
         open = data.status === 'OPEN';
         confusion = data.confusion;
-        if (changed && (selected === null || data.status === 'CLOSED')) display(slide);
+        if (changed && (selected === null || data.status === 'CLOSED')) {
+          follow(slide);
+        } else if (!faculty && slide && displayed !== slide.page && !activeRender && performance.now() >= retryAfter) {
+          // A temporary file/network error can occur while the page version
+          // stays unchanged. Reuse its full metadata and retry on live refresh.
+          follow(slide);
+        }
         if (selected === slide?.page) selected = null;
         paintIndex();
         if (!displayed && status.textContent === '') status.textContent = '교안 화면을 준비하는 중입니다.';
@@ -390,7 +402,7 @@
     content.replaceChildren();
     index.replaceChildren();
     status.textContent = '교안 화면을 준비하는 중입니다.';
-    if (slide && (!faculty || !localFile)) display(slide);
+    if (slide && (!faculty || !localFile)) follow(slide);
     tick();
     if (faculty) {
       const remote = () => api(path + '/document', {raw: true}).then(res => res.arrayBuffer()).then(loadPdf);
