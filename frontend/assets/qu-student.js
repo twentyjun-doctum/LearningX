@@ -97,7 +97,7 @@
       token = res.access_token;
       st.session = res.session;
       history.replaceState(null, '', location.pathname + (new URLSearchParams(location.search).get('api') ? `?api=${encodeURIComponent(new URLSearchParams(location.search).get('api'))}` : ''));
-      startCoach();
+      startCoach(res.initial_live);
     } catch (err) {
       const msg = err.status === 404 ? '열려 있는 수업을 찾지 못했어요. 코드를 다시 확인해 주세요.'
         : err.status === 423 ? '교수자가 잠시 질문 받기를 멈췄어요. 조금 뒤 다시 입장해 주세요.' : err;
@@ -115,14 +115,14 @@
   });
 
   /* ---------- 질문 코치 ---------- */
-  function startCoach() {
+  function startCoach(initial) {
     showScreen('coach');
     $('course-title').textContent = st.session.course_title || '오늘 수업';
     resetThread();
     applyStatus(st.session.status);
     stopPoll();
     liveView = window.QU.createLiveView({
-      api, session: st.session.id, panel: $('student-slide'),
+      api, session: st.session.id, panel: $('student-slide'), initial,
       onState: ({status}) => {
         if (status !== st.session.status) applyStatus(status);
       },

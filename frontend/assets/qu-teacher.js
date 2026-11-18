@@ -31,6 +31,8 @@
     else { if (btn.dataset.label) btn.textContent = btn.dataset.label; btn.disabled = false; }
   }
   let liveView;
+  let uploadedPdf;
+  let openedSession;
   function stopTimers() {
     liveView?.stop();
     if (state.live && state.live.timer) clearInterval(state.live.timer);
@@ -218,6 +220,7 @@
       setUploadState(JOB_LABEL[job.status] || job.status, job.status === 'READY' ? 100 : null);
       if (job.status === 'READY' && job.material_id) {
         u.timer = null;
+        if (u.file && /\.pdf$/i.test(u.file.name)) uploadedPdf = {material: job.material_id, file: u.file};
         await loadCourses().catch(() => {});
         return go(`prepare/${u.courseId}/${job.material_id}`);
       }
@@ -272,6 +275,7 @@
       }
       const init = await api(`/v1/courses/${u.courseId}/uploads/initiate`, { method: 'POST', body: { filename: file.name, size_bytes: file.size } });
       u.uploadId = init.upload_id;
+      u.file = file;
       await putFile(init.upload_url, init.headers, file);
       setUploadState('분석 요청 중', null);
       await api(`/v1/courses/${u.courseId}/uploads/${u.uploadId}/complete`, { method: 'POST' });
@@ -368,6 +372,7 @@
           body: { items, acknowledge_unprocessed_media: p.isPptx && $('media-ack').checked } });
       }
       const session = await api(`/v1/courses/${p.course.id}/sessions`, { method: 'POST', body: { material_id: p.material.id } });
+      openedSession = session;
       go(`live/${session.id}`);
     } catch (err) {
       if (err.status === 409 && err.detail === 'LIVE_PREVIEW_UNAVAILABLE') {
@@ -384,13 +389,16 @@
 
   /* ---------- 5–6 · 수업 중 보드 ---------- */
   async function renderLive(sessionId) {
-    const session = await api(`/v1/sessions/${sessionId}`);
+    const session = openedSession?.id === sessionId ? openedSession : await api(`/v1/sessions/${sessionId}`);
+    openedSession = null;
     if (session.status === 'CLOSED') return go(`end/${sessionId}`);
     const prev = state.live && state.live.session.id === sessionId ? state.live : null;
     state.live = { session, level: prev ? prev.level : 'all', seen: prev ? prev.seen : null, timer: null };
     screen('live');
     liveView = window.QU.createLiveView({
       api, session: sessionId, panel: $('teacher-slide'), faculty: true,
+      initial: session.initial_live,
+      localFile: uploadedPdf?.material === session.material_id ? uploadedPdf.file : null,
       onState: ({slide, status}) => {
         if (slide && state.live?.lastRequestedPage === slide.page) state.live.lastRequestedPage = undefined;
         if (status === 'CLOSED') go(`end/${sessionId}`);
@@ -464,7 +472,11 @@
   $('share-fullscreen').addEventListener('click', async () => {
     try {
       if (document.fullscreenElement) await document.exitFullscreen();
-      else await $('teacher-slide').requestFullscreen();
+      else {
+        const panel = $('teacher-slide');
+        await panel.requestFullscreen();
+        panel.focus({preventScroll: true});
+      }
     } catch (err) {
       setError($('global-error'), err);
     }

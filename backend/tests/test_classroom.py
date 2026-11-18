@@ -122,7 +122,12 @@ class ClassroomTests(unittest.TestCase):
         with patch.object(nit, "verified_count", return_value=1):
             opened = self.req("POST", course + "/sessions", self.tf,
                               json={"material_id": self.material_id}).json()
-        student = self.req("POST", "/v1/join", json={"code": opened["join_code"]}).json()["access_token"]
+        self.assertEqual(opened["initial_live"]["slide"]["page"], 1)
+        self.assertEqual(opened["initial_live"]["slide"]["visible_pages"], [1, 3, 4])
+        joined = self.req("POST", "/v1/join", json={"code": opened["join_code"]}).json()
+        self.assertEqual(joined["initial_live"]["slide"]["page"], 1)
+        self.assertNotIn("visible_pages", joined["initial_live"]["slide"])
+        student = joined["access_token"]
         path = f"/v1/sessions/{opened['id']}/live"
         self.assertEqual(self.req("GET", path + "/document", student).status_code, 403)
         self.assertEqual(self.req("GET", path + "/document", self.tf).status_code, 200)
