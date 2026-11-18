@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Question-up · 질문 코치</title>
+<link rel="icon" href="assets/brand/question-up-app-icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-kr@5/400.css">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-kr@5/700.css">
+<link rel="stylesheet" href="assets/qu.css">
+</head>
+<body class="stu">
+
+<!-- 입장 -->
+<section id="screen-join" class="stu-center" data-screen hidden>
+  <a class="qu-brand" href="index.html"><img src="assets/brand/question-up-app-icon.svg" alt="">Question-up</a>
+  <h1>수업 코드를<br>입력하세요</h1>
+  <p class="sub">교수자 화면에 보이는 6자리 코드예요.</p>
+  <form id="join-form" class="stack" novalidate>
+    <label class="sr-only" for="code">수업 코드</label>
+    <input id="code" class="input code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="6" placeholder="ABC123">
+    <p class="error" id="join-error" role="alert" hidden></p>
+    <button class="btn lg block" type="submit" id="join-btn">입장하기</button>
+  </form>
+  <p class="muted">로그인 없이 익명으로 참여합니다. 다른 학생에게는 내 이름이 보이지 않아요.</p>
+</section>
+
+<!-- 질문 코치 -->
+<div id="screen-coach" class="stu" data-screen hidden>
+  <header class="stu-head">
+    <div><div class="t" id="course-title"></div><div class="s">익명 참여 중</div></div>
+    <div class="row">
+      <button class="linkbtn" type="button" id="to-mine" hidden>내 질문</button>
+      <div class="plant-badge" aria-live="polite"><span id="badge-plant"></span><div><div class="k">내 질문의 키</div><div class="v" id="badge-level">아직 씨앗</div></div></div>
+    </div>
+  </header>
+  <p class="banner" id="status-banner" role="status" hidden></p>
+  <div class="stu-body">
+    <aside class="plant-panel" aria-label="내 질문의 키">
+      <span id="panel-plant"></span>
+      <p class="cap" id="panel-cap">질문을 쓰면 콩나무가 자라요. 구름 위까지 키워 보세요.</p>
+    </aside>
+    <main class="thread" id="thread" aria-live="polite"></main>
+  </div>
+  <div class="composer-wrap">
+    <form class="composer" id="composer" novalidate>
+      <label class="sr-only" for="q-input">내 질문</label>
+      <textarea id="q-input" rows="2" maxlength="2000" placeholder="궁금한 점을 질문으로 써 보세요"></textarea>
+      <button class="send" type="submit" id="send" aria-label="보내기" disabled>
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l15-7-5 15-2.5-6.5z" fill="#fff"/></svg>
+      </button>
+    </form>
+    <div class="composer-hint"><span id="hint">다른 학생에게는 내 이름이 보이지 않아요</span>
+      <button class="linkbtn" type="button" id="send-now" hidden>지금 교수자에게 보내기</button></div>
+  </div>
+</div>
+
+<!-- 제출 완료 -->
+<section id="screen-sent" class="stu-center" data-screen hidden>
+  <span class="chip ok">질문을 보냈어요</span>
+  <h1>이름 없이 교수자 화면에<br>전달됐어요</h1>
+  <p class="sub">수업에서 다뤄질 수 있어요.</p>
+  <div class="sent-card" id="sent-card"></div>
+  <button class="btn lg block" type="button" id="ask-another">질문 하나 더 쓰기</button>
+  <button class="btn block" type="button" id="sent-mine">내가 보낸 질문</button>
+</section>
+
+<!-- 내 질문 -->
+<section id="screen-mine" class="stu-center" data-screen hidden>
+  <div class="row between"><h1>내 질문</h1><span class="chip" id="mine-status"></span></div>
+  <p class="sub" id="mine-course"></p>
+  <p class="notice" id="mine-closed" hidden>수업이 끝나 더 이상 질문을 보낼 수 없어요. 이 화면을 닫으면 다시 볼 수 없으니 필요하면 지금 옮겨 적어 두세요.</p>
+  <div class="stack" id="mine-list"></div>
+  <button class="btn lg block" type="button" id="mine-back">질문 쓰러 가기</button>
+  <a class="btn block" href="student.html" id="mine-rejoin" hidden>다른 수업에 입장하기</a>
+</section>
+
+<script src="assets/qu-api.js"></script>
+<script src="assets/qu-plant.js"></script>
+<script src="assets/qu-student.js"></script>
+</body>
+</html>

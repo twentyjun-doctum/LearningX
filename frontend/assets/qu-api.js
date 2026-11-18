@@ -1,0 +1,95 @@
+/* Question-up shared API client. Tokens live in memory only: no storage, no cookies. */
+(() => {
+  'use strict';
+  const DEFAULT_API = 'https://p01--learningx-shared-api--6j4w9s7dpfzw.code.run';
+
+  function apiBase() {
+    const fromQuery = new URLSearchParams(location.search).get('api');
+    if (fromQuery && /^https:\/\/[^\s/]+|^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?/.test(fromQuery)) {
+      return fromQuery.replace(/\/+$/, '');
+    }
+    return DEFAULT_API;
+  }
+
+  const MESSAGES = {
+    401: '로그인이 만료됐습니다. 다시 입장해 주세요.',
+    403: '이 작업을 할 권한이 없습니다.',
+    404: '찾을 수 없습니다.',
+    409: '지금 상태에서는 할 수 없는 작업입니다.',
+    413: '파일이 너무 큽니다.',
+    415: 'PDF 또는 PPTX 파일만 올릴 수 있습니다.',
+    423: '지금은 질문을 받지 않는 중입니다.',
+    429: '시도가 너무 많습니다. 1분 뒤 다시 시도해 주세요.',
+    503: '서버가 이 작업을 처리할 준비가 되지 않았습니다. 잠시 뒤 다시 시도해 주세요.',
+  };
+
+  class ApiError extends Error {
+    constructor(status, detail) {
+      super(MESSAGES[status] || `서버 요청에 실패했습니다. (${status})`);
+      this.status = status;
+      this.detail = detail || '';
+    }
+  }
+
+  function client(getToken, onUnauthorized) {
+    const base = apiBase();
+    return async function request(path, { method = 'GET', body, raw = false, timeout = 60000 } = {}) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), timeout);
+      try {
+        const headers = {};
+        if (body !== undefined) headers['Content-Type'] = 'application/json';
+        const token = getToken && getToken();
+        if (token) headers.Authorization = 'Bearer ' + token;
+        let response;
+        try {
+          response = await fetch(base + path, {
+            method, headers, signal: controller.signal, credentials: 'omit', mode: 'cors',
+            cache: 'no-store', redirect: 'error',
+            body: body === undefined ? undefined : JSON.stringify(body),
+          });
+        } catch (err) {
+          throw new ApiError(0, err && err.name === 'AbortError' ? 'timeout' : 'network');
+        }
+        if (!response.ok) {
+          let detail = '';
+          try { detail = (await response.json()).detail || ''; } catch (_) { /* ignore */ }
+          if (response.status === 401 && onUnauthorized) onUnauthorized();
+          throw new ApiError(response.status, detail);
+        }
+        if (raw) return response;
+        return await response.json();
+      } finally {
+        clearTimeout(timer);
+      }
+    };
+  }
+
+  function el(tag, attrs = {}, ...children) {
+    const node = document.createElement(tag);
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === undefined || v === null || v === false) continue;
+      if (k === 'class') node.className = v;
+      else if (k === 'text') node.textContent = v;
+      else if (k.startsWith('on') && typeof v === 'function') node.addEventListener(k.slice(2), v);
+      else node.setAttribute(k, v === true ? '' : String(v));
+    }
+    for (const child of children.flat()) {
+      if (child === null || child === undefined || child === false) continue;
+      node.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+    return node;
+  }
+
+  const LEVEL = { shallow: '얕은', mid: '중간', deep: '깊은' };
+
+  function relTime(iso) {
+    if (!iso) return '';
+    const s = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+    if (s < 60) return '방금';
+    if (s < 3600) return Math.floor(s / 60) + '분 전';
+    return Math.floor(s / 3600) + '시간 전';
+  }
+
+  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime };
+})();
