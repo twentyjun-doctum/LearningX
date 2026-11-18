@@ -19,7 +19,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from .storage import Course, IngestJob, Material, SessionLocal
+from .storage import Course, IngestJob, Material, SessionLocal, User
+from .guest import is_guest, GUEST_UPLOAD_LIMIT
 from .security import actor, require_course, session
 from . import engine_adapter as nit, private_store
 
@@ -51,26 +52,39 @@ def _public_job(job):
             "analysis_coverage":json.loads(job.coverage_json) if job.coverage_json else None}
 
 
+
 @router.post("/courses/{course_id}/uploads/initiate",status_code=201)
 def initiate_upload(course_id:str,body:UploadRequest,
                     db:Session=Depends(session),user=Depends(actor)):
     require_course(db,course_id,user,"faculty")
     if not db.get(Course,course_id):raise HTTPException(404,"Course not found")
+    guest = is_guest(user)
+    job = None
+    if guest:
+        if body.size_bytes > GUEST_UPLOAD_LIMIT:
+            raise HTTPException(413, "Guest upload limit is 40 MiB")
+        db.query(User).filter_by(id=user.id).with_for_update().one()
+        job = db.query(IngestJob).filter_by(uploaded_by=user.id).first()
+        if job and (job.status != "AWAITING_UPLOAD" or job.course_id != course_id
+                    or job.filename != Path(body.filename).name or job.expected_size != body.size_bytes):
+            raise HTTPException(409, "Guest sessions can upload one lesson")
     suffix=Path(body.filename).suffix.lower()
     if suffix not in MIME:raise HTTPException(415,"PDF/PPTX only")
     store=private_store.require_store()
-    job=IngestJob(id=os.urandom(16).hex(),course_id=course_id,uploaded_by=user.id,
-                  filename=Path(body.filename).name[:260],
-                  media_type=MIME[suffix],expected_size=body.size_bytes,
-                  source_key="pending")
-    # Generate the unique source key before the INSERT/flush.
-    job.source_key=f"incoming/{course_id}/{job.id}/source{suffix}"
-    db.add(job)
+    if job is None:
+        job=IngestJob(id=os.urandom(16).hex(),course_id=course_id,uploaded_by=user.id,
+                      filename=Path(body.filename).name[:260],
+                      media_type=MIME[suffix],expected_size=body.size_bytes,
+                      source_key="pending")
+        # Generate the unique source key before the INSERT/flush.
+        job.source_key=f"incoming/{course_id}/{job.id}/source{suffix}"
+        db.add(job)
     try:
         url=store.client.generate_presigned_url(
             ClientMethod="put_object",
             Params={"Bucket":store.bucket,"Key":job.source_key,
-                    "ContentType":job.media_type},
+                    "ContentType":job.media_type,
+                    **({"ContentLength":body.size_bytes} if guest else {})},
             ExpiresIn=UPLOAD_TTL_SECONDS,
         )
         db.commit()

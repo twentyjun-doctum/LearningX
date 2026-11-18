@@ -27,6 +27,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from . import engine_adapter as nit
 from . import private_store
+from .guest import is_guest
 from .security import actor, issue_token, require_course, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
@@ -162,6 +163,9 @@ def _coach(db, s: ClassSession, user: User, text: str) -> dict:
     if not m or not c:
         raise HTTPException(404, "Session material not found")
     with private_store.material_workspace(m) as out:
+        owner = db.get(User, c.created_by)
+        if owner and is_guest(owner):
+            return nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, use_model=False)
         return nit.coach_question(out, user.id, text, c.policy, c.teacher_approved)
 
 

@@ -32,17 +32,12 @@
 
   <!-- 1 · 베타 진입 -->
   <section id="screen-login" class="qu-narrow" data-screen hidden>
-    <form id="login-form" class="card stack" novalidate>
-      <span class="chip ok">교수자 베타</span>
-      <h1 class="page-title">초대 코드로 시작하기</h1>
-      <p class="sub">운영진에게 받은 교수자 초대 코드를 입력하세요. 코드는 이 화면에서만 쓰이고 저장되지 않습니다.</p>
-      <div class="field">
-        <label for="invite">베타 초대 코드</label>
-        <input id="invite" class="input" type="password" autocomplete="off" spellcheck="false" required>
-      </div>
-      <p class="error" id="login-error" hidden></p>
-      <button class="btn lg block" type="submit">시작하기</button>
-    </form>
+    <div class="card stack">
+      <h1 class="page-title">체험 수업 열기</h1>
+      <p class="sub">교안을 올리고 승인한 뒤 수업을 시작하면 학생 입장 코드가 생성됩니다. 체험 수업의 질문 코칭은 기본 안내로 제공됩니다. 수업 관리에 사용하는 이 탭은 수업 종료까지 유지해 주세요.</p>
+      <p class="error" id="login-error" hidden role="alert"></p>
+      <button id="guest-start" class="btn lg block" type="button">체험 수업 시작</button>
+    </div>
   </section>
 
   <!-- 3 · 내 수업 -->
@@ -64,7 +59,7 @@
         <input id="course-title" class="input" placeholder="예: 3주차 · 의제설정 이론" maxlength="180">
       </div>
       <div class="field">
-        <label for="upload-file">교안 파일 (PDF·PPTX, 100MB까지)</label>
+        <label for="upload-file">교안 파일 (PDF·PPTX, 40MB까지)</label>
         <input id="upload-file" class="input" type="file" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
       </div>
       <div class="card tight stack" id="upload-progress" hidden>

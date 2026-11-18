@@ -17,6 +17,7 @@ from .security import actor, session, require_course, secret, issue_token
 from . import engine_adapter as nit
 from . import private_store
 from .ingest_queue import router as ingest_router
+from .guest import router as guest_router, is_guest
 from .classroom import router as classroom_router
 
 app=FastAPI(title="LearningX NIT Backend",version="0.1.0",docs_url=None,redoc_url=None)
@@ -110,6 +111,10 @@ def faculty_beta_session(data: FacultyBetaInvite, response: Response, db: Sessio
 @app.post("/v1/courses",status_code=201)
 def create_course(data:CourseCreate,db:Session=Depends(session),user:User=Depends(actor)):
     if user.role not in ("faculty","admin"):raise HTTPException(403,"Faculty only")
+    if is_guest(user):
+        db.query(User).filter_by(id=user.id).with_for_update().one()
+        if db.query(Course.id).filter_by(created_by=user.id).first():
+            raise HTTPException(409, "Guest sessions can create one course")
     c=Course(title=data.title,policy=data.policy,teacher_approved=data.teacher_approved,created_by=user.id)
     db.add(c);db.flush()
     db.add(Member(course_id=c.id,user_id=user.id,role="faculty"))
@@ -142,6 +147,7 @@ def update_policy(course_id:str,data:CoursePolicy,db:Session=Depends(session),us
 
 @app.post("/v1/courses/{course_id}/materials",status_code=201)
 async def upload_material(course_id:str,file:UploadFile=File(...),db:Session=Depends(session),user:User=Depends(actor)):
+    if is_guest(user):raise HTTPException(403,"Use the classroom upload flow")
     require_course(db,course_id,user,"faculty")
     if not db.get(Course,course_id):raise HTTPException(404,"Course not found")
     # A Vercel function cannot persist teacher evidence in /tmp.
@@ -290,3 +296,5 @@ app.include_router(ingest_router)
 
 # Live class sessions: join codes, anonymous students, question board.
 app.include_router(classroom_router)
+
+app.include_router(guest_router)

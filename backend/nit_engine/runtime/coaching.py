@@ -120,6 +120,8 @@ def run_coaching(out, question, policy, teacher_approved, signing_secret, authen
             # Authorized page is present, but there is no relevant verified
             # text on that page. Never use evidence from another page.
             return _fallback('clarify','no_matching_approved_evidence_on_page')
+    if gateway is None:
+        return _fallback(reason="guest_model_disabled")
     id_map=_ids_for(items)
     allowed=list(id_map)
     model_user=json.dumps({'student_question':question,
