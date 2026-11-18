@@ -17,6 +17,7 @@
   let target;
   let uploaded = false;
   let material;
+  let analysisCoverage;
   let queued = false;
   let failedJob = false;
   let running = false;
@@ -80,7 +81,10 @@
   async function waitForAnalysis(path) {
     for (let attempt = 0; attempt < 60; attempt += 1) {
       const job = await request(path);
-      if (job.status === 'READY' && job.material_id) return job.material_id;
+      if (job.status === 'READY' && job.material_id) {
+        analysisCoverage = job.analysis_coverage;
+        return job.material_id;
+      }
       if (job.status === 'FAILED') {
         failedJob = true;
         throw new Error('교안 분석에 실패했습니다. 이어서 진행을 눌러 다시 시도해 주세요.');
@@ -108,7 +112,12 @@
     media.hidden = !/\.pptx$/i.test(documentFile.name);
     acknowledge.required = !media.hidden;
     review.hidden = !data.eligible_candidates.length;
-    status.textContent = review.hidden ? '승인 가능한 교안 근거가 없습니다.' : '텍스트 추출 완료 · 이미지·도표 해석은 수행되지 않았습니다. 승인할 근거를 검토해 주세요.';
+    const visual = analysisCoverage?.vision;
+    const visualNotice = visual?.completed_jobs > 0
+      ? '이미지·도표 ' + visual.completed_jobs + '건을 추가 분석했습니다. 해석 결과는 아직 검증되지 않았습니다.'
+      : '이미지·도표 해석은 수행되지 않았습니다.';
+    status.textContent = review.hidden ? '승인 가능한 교안 근거가 없습니다. ' + visualNotice
+      : '텍스트 추출 완료 · ' + visualNotice + ' 승인할 근거를 검토해 주세요.';
   }
 
   async function start(event) {

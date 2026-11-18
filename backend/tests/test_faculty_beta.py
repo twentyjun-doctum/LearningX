@@ -85,7 +85,7 @@ class FacultyBetaTests(unittest.TestCase):
                 status = client.get(path, headers=headers).json()
                 assert status["status"] == "READY"
                 assert status["analysis_coverage"]["native_extraction"] == "COMPLETE"
-                assert status["analysis_coverage"]["vision"]["status"] == "NOT_RUN"
+                assert status["analysis_coverage"]["vision"]["status"] == "NOT_REQUIRED"
                 assert status["analysis_coverage"]["semantic_analysis"] == "NOT_RUN"
                 assert status["analysis_coverage"]["faculty_approval_required"] is True
                 material_id = status["material_id"]
