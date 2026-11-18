@@ -55,6 +55,10 @@
     const status = panel.querySelector('[data-live-status]');
     const path = '/v1/sessions/' + encodeURIComponent(session) + '/live';
     const frames = new Map();
+    const pageFiles = new Map();
+    const downloads = new Map();
+    const pageCacheLimit = 24 * 1024 * 1024;
+    let retainedBytes = 0;
     let deck = null;
     let slide = initial?.slide ?? null;
     let selected = null;
@@ -69,7 +73,12 @@
     let renderId = 0;
 
     function cached(key, make) {
-      if (frames.has(key)) return frames.get(key);
+      if (frames.has(key)) {
+        const existing = frames.get(key);
+        frames.delete(key);
+        frames.set(key, existing);
+        return existing;
+      }
       const frame = make().catch(err => {
         if (frames.get(key) === frame) frames.delete(key);
         throw err;
@@ -94,11 +103,37 @@
       }, LEVEL[item.level])));
     }
 
-    function pageFrame(target, number, w, h) {
+    function pageBytes(target, number) {
+      const retained = pageFiles.get(number);
+      if (retained) {
+        pageFiles.delete(number);
+        pageFiles.set(number, retained);
+        return Promise.resolve(retained);
+      }
+      if (downloads.has(number)) return downloads.get(number);
+      const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
+      const pending = api(url, {raw: true, timeout: 12000}).then(res => res.arrayBuffer()).then(bytes => {
+        if (!stopped && bytes.byteLength <= pageCacheLimit) {
+          while (retainedBytes + bytes.byteLength > pageCacheLimit || pageFiles.size >= 8) {
+            const oldest = pageFiles.keys().next().value;
+            retainedBytes -= pageFiles.get(oldest).byteLength;
+            pageFiles.delete(oldest);
+          }
+          pageFiles.set(number, bytes);
+          retainedBytes += bytes.byteLength;
+        }
+        return bytes;
+      }).finally(() => downloads.delete(number));
+      downloads.set(number, pending);
+      return pending;
+    }
+
+    function pageFrame(target, number, w, h, onBytes) {
       return cached('page:' + number + ':' + w + ':' + h, async () => {
-        const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
-        const res = await api(url, {raw: true, timeout: 12000});
-        const pdf = await loadPdf(await res.arrayBuffer());
+        const bytes = await pageBytes(target, number);
+        onBytes?.();
+        // PDF.js transfers the input to its worker. Keep the cached bytes intact.
+        const pdf = await loadPdf(bytes.slice(0));
         try {
           return await renderPage(pdf, 1, w, h);
         } finally {
@@ -119,16 +154,21 @@
       const w = width();
       const h = height();
       let frame;
+      const preloadNext = () => {
+        if (!faculty && !stopped && id === renderId && target.after) {
+          pageBytes(target, target.after).catch(() => {});
+        }
+      };
       try {
         if (deck) {
           frame = await cached('deck:' + target.page + ':' + w + ':' + h, () => renderPage(deck, target.page, w, h));
         } else if (target.pdf && (!faculty || !localFile)) {
           try {
-            frame = await pageFrame(target, target.page, w, h);
+            frame = await pageFrame(target, target.page, w, h, preloadNext);
           } catch (err) {
             if (err.status !== 409 || stopped || id !== renderId) throw err;
             // An in-flight preload may have used the previous slide version.
-            frame = await pageFrame(target, target.page, w, h);
+            frame = await pageFrame(target, target.page, w, h, preloadNext);
           }
         }
       } catch (err) {
@@ -208,6 +248,9 @@
       ++renderId;
       deck?.doc.destroy();
       frames.clear();
+      pageFiles.clear();
+      downloads.clear();
+      retainedBytes = 0;
     }
 
     function select(number) {
