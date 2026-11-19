@@ -117,11 +117,9 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  let confusion;
  const css = fs.readFileSync(path.join(root, 'assets/qu.css'), 'utf8');
  assert.doesNotMatch(css, /:fullscreen[^{}]*\.live-marks[^{}]*\{[^{}]*display:\s*none/);
- let releaseOld;
  let failedLatest = false;
  let releaseStalled;
  const stalled = new Promise(resolve => { releaseStalled = resolve; });
- const oldPrefetch = new Promise(resolve => { releaseOld = resolve; });
  const calls = [];
  let lastRendered = null;
  const content = panel.querySelector('[data-live-content]');
@@ -143,7 +141,6 @@ console.log('OK: API origin confinement protects invite codes and tokens');
     transitions: cursor >= 0 ? timeline.slice(cursor+1) : []};
   }
   calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
-  if (url.pathname.endsWith('/v1') && url.searchParams.get('page') === '2') return oldPrefetch;
   if (url.pathname.endsWith('/v6')) return stalled;
   if (url.pathname.endsWith('/v4') && !failedLatest) {
    failedLatest = true;
@@ -177,16 +174,15 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   assert.ok(condition(),label);
  }
  try {
-  await until(()=>calls.some(([v,p])=>v==='v1'&&p===2) && view.page()===1,'old prefetch remains in flight');
+  await until(()=>view.page()===1,'first page rendered');
+  assert.deepEqual(calls,[['v1',1]],'no adjacent page request for the student');
   latest = slide(2,'v4',3);
   timeline.push(slide(6,'v2',7),slide(8,'v3',9),latest);
   await until(()=>view.page()===2,'student retries the latest page without another teacher transition');
   assert.deepEqual(painted,['1 / 9','2 / 9']);
   assert.ok(!calls.some(([version])=>version==='v2'||version==='v3'));
   assert.equal(calls.filter(([v,p])=>v==='v4'&&p===2).length,2);
-  releaseOld(response);
   await new Promise(resolve=>setTimeout(resolve,25));
-  assert.equal(lastRendered,'2 / 9','old prefetch does not overwrite the current page');
   const sameFrame = content.children[0];
   const selection = {left:.2, top:.3, right:.4, bottom:.35};
   confusion = {spots:[{x:.3, y:.3, count:1, rects:[selection]}]};
@@ -203,7 +199,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   latest = slide(1,'v5');
   timeline.push(latest);
   await until(()=>painted.length>oldDraw && view.page()===1,'return to a previously rendered page');
-  assert.ok(!calls.some(([version, number])=>version==='v5'&&number===1),'warm canvas reused across transition versions');
+  assert.ok(calls.some(([version, number])=>version==='v5'&&number===1),'a new broadcast version is authorized by the server');
   latest = slide(5,'v6');
   timeline.push(latest);
   await until(()=>calls.some(([version])=>version==='v6'),'intermediate page request is stalled');
@@ -246,7 +242,6 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   panel.listeners.get('pointerdown')({target:content});
   assert.ok(!menuClasses.has('selection-actions'),'outside press dismisses menu');
  } finally {
-  releaseOld(response);
   releaseStalled(response);
   view.stop();
  }

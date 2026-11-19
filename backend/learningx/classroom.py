@@ -22,6 +22,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
@@ -31,7 +32,7 @@ from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
-from .security import actor, issue_token, require_course, session
+from .security import actor, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
 router = APIRouter(prefix="/v1")
@@ -326,7 +327,7 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
     _audit(db, user.id, course_id, "session_opened", m.id)
     db.commit()
     return {**_public_session(db, s, faculty=True),
-            "initial_live": {"status": s.status, "slide": {**_slide_metadata(first_slide), "visible_pages": pages},
+            "initial_live": {"status": s.status, "slide": {**_slide_metadata(first_slide, faculty=True), "visible_pages": pages},
                              "index": []}}
 
 
@@ -350,6 +351,7 @@ def get_session(session_id: str, db: Session = Depends(session), user: User = De
 @router.put("/sessions/{session_id}/state")
 def set_state(session_id: str, data: SessionState, db: Session = Depends(session), user: User = Depends(actor)):
     s = _faculty_session(db, session_id, user)
+    db.refresh(s, with_for_update=True)
     if s.status == "CLOSED":
         raise HTTPException(409, "Session already closed")
     s.status = data.status
@@ -362,13 +364,15 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
 
 
 @router.get("/sessions/{session_id}/live")
-async def live_snapshot(session_id: str, response: Response, version: str = "",
+async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
                         after: str | None = None, index_version: str = "", cursor: str | None = None,
-                        db: Session = Depends(session), user: User = Depends(actor)):
+                        db: Session = Depends(session), user: User = Depends(actor),
+                        credentials: HTTPAuthorizationCredentials = Depends(scheme)):
     if after is not None and after == revision(session_id) and (cursor is None or cursor == version):
         await run_in_threadpool(_live_access, db, session_id, user)
         await run_in_threadpool(db.rollback)
         await wait_for_update(session_id, after)
+        user = await run_in_threadpool(actor, request, credentials, db)
     stamp = revision(session_id)
     response.headers["Cache-Control"] = "no-store"
     snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version, cursor)
@@ -387,12 +391,16 @@ def _live_access(db, session_id, user):
     return current, faculty
 
 
-def _slide_metadata(slide, version=""):
+def _slide_metadata(slide, version="", *, faculty=False):
     if slide is None:
         return None
     metadata = {"page": slide.page, "total": slide.total, "version": slide.version}
     if version != slide.version:
-        metadata.update(json.loads(slide.content))
+        content = json.loads(slide.content)
+        if not faculty:
+            content.pop("before", None)
+            content.pop("after", None)
+        metadata.update(content)
     return metadata
 
 
@@ -429,16 +437,16 @@ def _snapshot(db, session_id, user, version, cursor=None):
                 {"x": x / 20, "y": y / 20, "count": count, **({"rects": json.loads(rects)} if rects else {})}
                 for x, y, count, rects in groups if x is not None
             ]
-    snapshot = _slide_metadata(slide, version)
+    snapshot = _slide_metadata(slide, version, faculty=faculty)
     if faculty and snapshot and snapshot.get("pdf"):
         snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
     transitions = []
-    if cursor and slide and cursor != slide.version:
+    if faculty and cursor and slide and cursor != slide.version:
         history = db.query(LiveTransition).filter_by(session_id=session_id)
         prior = history.filter_by(version=cursor).first()
         latest = history.filter_by(version=slide.version).first()
         if prior and latest:
-            transitions = [_slide_metadata(item) for item in history.filter(
+            transitions = [_slide_metadata(item, faculty=True) for item in history.filter(
                 LiveTransition.position > prior.position,
                 LiveTransition.position <= latest.position,
             ).order_by(LiveTransition.position).limit(32)]
@@ -473,25 +481,39 @@ def live_document(session_id: str, db: Session = Depends(session), user: User = 
 
 
 @router.get("/sessions/{session_id}/live/page/{version}")
-def live_page(session_id: str, version: str, page: int | None = None, db: Session = Depends(session), user: User = Depends(actor)):
-    current, _ = _live_access(db, session_id, user)
+def live_page(session_id: str, version: str, request: Request, page: int | None = None,
+              db: Session = Depends(session), user: User = Depends(actor),
+              credentials: HTTPAuthorizationCredentials = Depends(scheme)):
+    material, target = _authorized_live_page(db, session_id, user, version, page)
+    db.expunge(material)
+    db.rollback()
+    content = page_pdf(material, target)
+    # Storage reads and PDF splitting can outlast a page turn or a permission change.
+    user = actor(request, credentials, db)
+    _authorized_live_page(db, session_id, user, version, page)
+    return _pdf_response(content)
+
+
+def _authorized_live_page(db, session_id, user, version, page):
+    current, faculty = _live_access(db, session_id, user)
     slide = db.get(LiveSlide, session_id)
     if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
     historical = slide.version != version
     if historical:
+        if not faculty:
+            raise HTTPException(409, "This page is no longer being shared")
         slide = db.query(LiveTransition).filter_by(session_id=session_id, version=version).first()
         if not slide:
             raise HTTPException(409, "This page is no longer being shared")
     content = json.loads(slide.content)
     if not content.get("pdf"):
         raise HTTPException(404, "No PDF for this page")
-    material = db.get(Material, current.material_id)
     target = slide.page if page is None else page
-    allowed = (slide.page,) if historical else (slide.page, content.get("before"), content.get("after"))
+    allowed = (slide.page,) if historical or not faculty else (slide.page, content.get("before"), content.get("after"))
     if target not in allowed:
         raise HTTPException(403, "This page is outside the active slide window")
-    return _pdf_response(page_pdf(material, target))
+    return db.get(Material, current.material_id), target
 
 
 def _pdf_response(content):
@@ -501,12 +523,18 @@ def _pdf_response(content):
 
 
 @router.put("/sessions/{session_id}/live")
-def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session), user: User = Depends(actor)):
+def share_slide(session_id: str, data: ShareSlide, request: Request,
+                db: Session = Depends(session), user: User = Depends(actor),
+                credentials: HTTPAuthorizationCredentials = Depends(scheme)):
     current = _faculty_session(db, session_id, user)
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     material = db.get(Material, current.material_id)
+    db.expunge(material)
+    db.rollback()
     snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
+    user = actor(request, credentials, db)
+    current = _faculty_session(db, session_id, user)
     # Serialize presenters sharing the same classroom.
     db.refresh(current, with_for_update=True)
     if current.status == "CLOSED":

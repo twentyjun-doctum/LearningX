@@ -314,23 +314,24 @@
     }
 
     function pageBytes(target, number) {
-      const retained = pageFiles.get(number);
+      const key = target.version + ":" + number;
+      const cacheKey = faculty ? number : key;
+      const retained = pageFiles.get(cacheKey);
       if (retained) {
-        pageFiles.delete(number);
-        pageFiles.set(number, retained);
+        pageFiles.delete(cacheKey);
+        pageFiles.set(cacheKey, retained);
         return Promise.resolve(retained);
       }
-      const key = target.version + ":" + number;
       if (downloads.has(key)) return downloads.get(key);
       const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
       const pending = api(url, {raw: true, timeout: 12000}).then(res => res.arrayBuffer()).then(bytes => {
-        if (!stopped && bytes.byteLength <= pageCacheLimit) {
+        if (!stopped && (faculty || target.version === slide?.version) && bytes.byteLength <= pageCacheLimit) {
           while (retainedBytes + bytes.byteLength > pageCacheLimit || pageFiles.size >= 8) {
             const oldest = pageFiles.keys().next().value;
             retainedBytes -= pageFiles.get(oldest).byteLength;
             pageFiles.delete(oldest);
           }
-          pageFiles.set(number, bytes);
+          pageFiles.set(cacheKey, bytes);
           retainedBytes += bytes.byteLength;
         }
         return bytes;
@@ -339,19 +340,18 @@
       return pending;
     }
 
-    function pageFrame(target, number, w, h, onBytes) {
-      const rendered = 'rendered:' + number + ':' + w + ':' + h;
+    function pageFrame(target, number, w, h) {
+      const rendered = 'rendered:' + (faculty ? '' : target.version + ':') + number + ':' + w + ':' + h;
       const ready = frames.get(rendered);
       if (ready) return cached(rendered, () => ready);
       const inFlight = 'page:' + target.version + ':' + number + ':' + w + ':' + h;
       return cached(inFlight, async () => {
         const bytes = await pageBytes(target, number);
-        onBytes?.();
         // PDF.js transfers the input to its worker. Keep the cached bytes intact.
         const pdf = await loadPdf(bytes.slice(0));
         try {
           const frame = await renderPage(pdf, 1, w, h);
-          if (!stopped) {
+          if (!stopped && (faculty || target.version === slide?.version)) {
             frames.delete(inFlight);
             cached(rendered, () => Promise.resolve(frame));
           }
@@ -391,16 +391,11 @@
       const w = width();
       const h = height();
       let frame;
-      const preloadNext = () => {
-        if (!faculty && !stopped && id === renderId && target.version === slide?.version && target.after) {
-          pageBytes(target, target.after).catch(() => {});
-        }
-      };
       try {
         if (deck) {
           frame = await cached('deck:' + target.page + ':' + w + ':' + h, () => renderPage(deck, target.page, w, h));
         } else if (target.pdf && (!faculty || !localFile)) {
-          frame = await pageFrame(target, target.page, w, h, preloadNext);
+          frame = await pageFrame(target, target.page, w, h);
         }
       } catch (err) {
         if (stopped || id !== renderId || err.status === 409) return;
@@ -429,10 +424,6 @@
             cached('deck:' + number + ':' + w + ':' + h, () => renderPage(deck, number, w, h)).catch(() => {});
           }
         }
-      } else if (!faculty && target.pdf && target.version === slide?.version) {
-        for (const number of [target.after, target.before]) {
-          if (number) pageFrame(target, number, w, h).catch(() => {});
-        }
       }
       return true;
     }
@@ -449,6 +440,11 @@
         if (stamp === undefined) delay = 2000;
         const changed = slide?.version !== data.slide?.version;
         if (changed) {
+          if (!faculty) {
+            frames.clear();
+            pageFiles.clear();
+            retainedBytes = 0;
+          }
           slide = data.slide;
           if (slide?.visible_pages) visiblePages = slide.visible_pages;
           if (selected === null || slide?.page === selected) navigation = slide;
@@ -469,6 +465,11 @@
         if (data.status === 'CLOSED') stop();
       } catch (err) {
         if (stopped) return;
+        if (!faculty && (err.status === 401 || err.status === 403)) {
+          stop();
+          status.textContent = '교안 접근 권한이 없습니다.';
+          return;
+        }
         status.textContent = '연결을 다시 확인하는 중입니다.';
         delay = 1200;
       } finally {
@@ -490,6 +491,12 @@
 
     function stop() {
       stopped = true;
+      if (!faculty) {
+        displayed = null;
+        content.replaceChildren();
+        index?.replaceChildren();
+        page.textContent = '송출 종료';
+      }
       clearTimeout(timer);
       clearTimeout(retryTimer);
       hideSelectionActions();
