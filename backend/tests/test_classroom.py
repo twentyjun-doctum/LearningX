@@ -87,13 +87,18 @@ class ClassroomTests(unittest.TestCase):
                   "rects": [{"left": .2, "top": .02 * i, "right": .4, "bottom": .02 * i + .01}
                             for i in range(24)]}
         reaction = path + "/live/confusion"
-        self.assertEqual(self.req("PUT", reaction, first, json={"page": 1, "anchor": anchor}).status_code, 409)
+        self.assertEqual(self.req("PUT", reaction, first, json={"page": 3, "anchor": anchor}).status_code, 409)
         for _ in range(2):
             self.assertEqual(self.req("PUT", reaction, first, json={"page": 2, "anchor": anchor}).status_code, 200)
         summary = self.req("GET", path + "/live", self.tf).json()["confusion"]
         self.assertEqual(summary, {"count": 1, "spots": [{"x": .3, "y": .5, "count": 1, "rects": anchor["rects"]}]})
         self.assertIsNone(self.req("GET", path + "/live", second).json()["confusion"])
         self.assertTrue(self.req("GET", path + "/live", first).json()["confusion"]["mine"])
+        self.assertEqual(self.req("PUT", reaction, first, json={"page": 1, "anchor": anchor}).status_code, 200)
+        with patch.object(classroom, "build_snapshot", return_value=(3, {"text": "Shared slide"})):
+            for page in (1, 2):
+                self.assertEqual(self.req("PUT", path + "/live", self.tf, json={"page": page}).status_code, 200)
+                self.assertEqual(self.req("GET", path + "/live", self.tf).json()["confusion"], summary)
         with patch.object(nit, "coach_question", return_value=coaching("analyze")):
             question = self.req("POST", path + "/questions", first,
                                 json={"question": "질문의 근거는 무엇인가요?", "slide_page": 1, "anchor": anchor}).json()

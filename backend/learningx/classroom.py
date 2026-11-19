@@ -675,8 +675,10 @@ def flag_confusion(session_id: str, data: ConfusionRequest, db: Session = Depend
     if current.status != "OPEN":
         raise HTTPException(423, "The class is not taking feedback right now")
     slide = db.get(LiveSlide, session_id)
-    if not slide or slide.page != data.page:
-        raise HTTPException(409, "The shared page changed")
+    if not slide or (slide.page != data.page and not db.query(LiveTransition).filter_by(
+        session_id=session_id, page=data.page,
+    ).first()):
+        raise HTTPException(409, "The page has not been shared")
     anchor = data.anchor
     x = round(anchor.x * 20) if anchor else None
     y = round(anchor.y * 20) if anchor else None

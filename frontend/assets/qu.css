@@ -299,3 +299,5 @@ html.live-selecting {overflow: hidden; overflow-anchor: none;}
   .file-picker {grid-template-columns:auto minmax(0, 1fr); gap:8px 10px; padding:12px;}
   .file-picker-action {grid-column:2; justify-self:start;}
 }
+
+.live-mark.at-selection-corner {transform:translate(2px, calc(-100% - 2px));}
