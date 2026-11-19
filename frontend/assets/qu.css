@@ -1,7 +1,7 @@
 /* Question-up design tokens and components — see "Question-up 프론트엔드 디자인 사양". */
-@font-face{font-family:'QU Sans';font-weight:400;src:local('Freesentation 4 Regular'),local('Freesentation-4Regular'),local('Freesentation Regular');}
-@font-face{font-family:'QU Sans';font-weight:500;src:local('Freesentation 5 Medium'),local('Freesentation-5Medium'),local('Freesentation Medium');}
-@font-face{font-family:'QU Sans';font-weight:700;src:local('Freesentation 7 Bold'),local('Freesentation-7Bold'),local('Freesentation Bold');}
+@font-face{font-family:'QU Sans';font-weight:400;font-display:swap;src:url('https://cdn.jsdelivr.net/gh/Freesentation/freesentation@98f6b841fca55a23fbb0f9eb91acda0e16a676ea/woff2/Freesentation-4Regular.woff2') format('woff2');}
+@font-face{font-family:'QU Sans';font-weight:500;font-display:swap;src:url('https://cdn.jsdelivr.net/gh/Freesentation/freesentation@98f6b841fca55a23fbb0f9eb91acda0e16a676ea/woff2/Freesentation-5Medium.woff2') format('woff2');}
+@font-face{font-family:'QU Sans';font-weight:700;font-display:swap;src:url('https://cdn.jsdelivr.net/gh/Freesentation/freesentation@98f6b841fca55a23fbb0f9eb91acda0e16a676ea/woff2/Freesentation-7Bold.woff2') format('woff2');}
 
 :root{
   --font-sans:'QU Sans','Freesentation','Noto Sans KR','Apple SD Gothic Neo','Malgun Gothic',sans-serif;
