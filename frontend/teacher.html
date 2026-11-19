@@ -94,15 +94,15 @@
       <div class="stat"><div class="k">이미 승인됨</div><div class="v" id="cand-approved">–</div></div>
     </div>
     <p class="notice" id="media-notice" hidden>이 교안의 내레이션 오디오나 도표는 분석되지 않아 코칭에 쓰이지 않습니다.</p>
+    <div class="card tight prepare-consent">
+      <label class="check"><input type="checkbox" id="ai-consent">이 수업에서 학생 질문 코칭에 AI를 사용합니다. AI는 정답을 알려 주지 않고, 승인한 근거로 되묻기만 합니다.</label>
+    </div>
     <div class="list">
       <div class="head row between"><span>교안 내용</span><button class="btn sm" type="button" id="select-all">모두 선택</button></div>
       <p class="muted small">코칭에 사용할 내용을 한 번에 최대 1,000개 선택해 주세요. 다시 승인하면 선택한 내용으로 승인 범위가 바뀝니다.</p>
       <div id="candidate-list"></div>
     </div>
-    <div class="card tight stack">
-      <label class="check" id="media-ack-row" hidden><input type="checkbox" id="media-ack">분석되지 않은 오디오·도표가 있다는 것을 확인했습니다.</label>
-      <label class="check"><input type="checkbox" id="ai-consent">이 수업에서 학생 질문 코칭에 AI를 사용합니다. AI는 정답을 알려 주지 않고, 승인한 근거로 되묻기만 합니다.</label>
-    </div>
+    <label class="card tight check" id="media-ack-row" hidden><input type="checkbox" id="media-ack">분석되지 않은 오디오·도표가 있다는 것을 확인했습니다.</label>
     <p class="error" id="prepare-error" hidden></p>
   </section>
 
