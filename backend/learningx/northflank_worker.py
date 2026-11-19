@@ -40,7 +40,7 @@ def run(stop_event=None, poll_interval=None):
     validate_config()
     stopped = stop_event or threading.Event()
     interval = poll_interval if poll_interval is not None else int(
-        os.getenv("NIT_WORKER_POLL_SECONDS", "8"))
+        os.getenv("NIT_WORKER_POLL_SECONDS", "2"))
     interval = max(2, min(int(interval), 60))
 
     print("learningx_worker_started", flush=True)

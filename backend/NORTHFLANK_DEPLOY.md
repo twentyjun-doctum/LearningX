@@ -52,7 +52,7 @@ Set these through Northflank Secret Groups (NEVER GitHub, Dockerfile, build args
 - NIT_REVIEW_SIGNING_KEY: a DIFFERENT strong secret, >=32 characters
 - NIT_CORS_ORIGINS: https://learning-x-one.vercel.app
 - NIT_WORKER_BACKEND: northflank_poll for both API and worker
-- NIT_WORKER_POLL_SECONDS: 8 for the worker (optional)
+- NIT_WORKER_POLL_SECONDS: 2 by default for the worker (optional)
 - NIT_LLM_BASE_URL, NIT_LLM_MODEL, NIT_LLM_API_KEY: actual verified model provider configuration, server only
 
 Built into the image: NIT_HOSTED_RUNTIME=1 (no SQLite or local artifacts allowed), NIT_ENGINE_ROOT=/app/nit_engine and port 8080.

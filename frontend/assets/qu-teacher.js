@@ -197,14 +197,15 @@
     $('upload-picker-name').textContent = file?.name ?? '교안을 여기에 놓으세요';
     $('upload-picker-meta').textContent = file
       ? (file.size >= 1024 * 1024 ? (file.size / (1024 * 1024)).toFixed(1) + ' MB' : Math.ceil(file.size / 1024) + ' KB')
-      : 'PDF 또는 PPTX · 최대 40MB';
+      : 'PDF 최대 60MB · PPTX 최대 40MB';
     $('upload-picker-action').textContent = file ? '파일 변경' : '파일 선택';
   }
 
   function fileError(file) {
     if (!file) return '올릴 교안 파일을 골라 주세요.';
     if (!/\.(pdf|pptx)$/i.test(file.name)) return 'PDF 또는 PPTX 파일만 올릴 수 있습니다.';
-    if (file.size > 40 * 1024 * 1024) return '40MB 이하 파일만 올릴 수 있습니다.';
+    const maxMb = /\.pdf$/i.test(file.name) ? 60 : 40;
+    if (file.size > maxMb * 1024 * 1024) return maxMb + 'MB 이하 파일만 올릴 수 있습니다.';
     return null;
   }
 

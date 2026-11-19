@@ -23,7 +23,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from .storage import Course, IngestJob, Material, SessionLocal, User
-from .guest import is_guest, GUEST_UPLOAD_LIMIT
+from .guest import is_guest
 from .security import actor, require_course, session
 from . import engine_adapter as nit, private_store
 
@@ -63,18 +63,19 @@ def initiate_upload(course_id:str,body:UploadRequest,
                     db:Session=Depends(session),user=Depends(actor)):
     require_course(db,course_id,user,"faculty")
     if not db.get(Course,course_id):raise HTTPException(404,"Course not found")
+    suffix=Path(body.filename).suffix.lower()
+    if suffix not in MIME:raise HTTPException(415,"PDF/PPTX only")
     guest = is_guest(user)
     job = None
     if guest:
-        if body.size_bytes > GUEST_UPLOAD_LIMIT:
-            raise HTTPException(413, "Guest upload limit is 40 MiB")
+        limit = private_store.PDF_UPLOAD_LIMIT if suffix == ".pdf" else private_store.PPTX_UPLOAD_LIMIT
+        if body.size_bytes > limit:
+            raise HTTPException(413, f"Guest upload limit is {limit // (1024 * 1024)} MiB")
         db.query(User).filter_by(id=user.id).with_for_update().one()
         job = db.query(IngestJob).filter_by(uploaded_by=user.id).first()
         if job and (job.status != "AWAITING_UPLOAD" or job.course_id != course_id
                     or job.filename != Path(body.filename).name or job.expected_size != body.size_bytes):
             raise HTTPException(409, "Guest sessions can upload one lesson")
-    suffix=Path(body.filename).suffix.lower()
-    if suffix not in MIME:raise HTTPException(415,"PDF/PPTX only")
     store=private_store.require_store()
     if job is None:
         job=IngestJob(id=os.urandom(16).hex(),course_id=course_id,uploaded_by=user.id,

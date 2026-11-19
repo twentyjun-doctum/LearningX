@@ -8,6 +8,7 @@ import hashlib
 import json
 import mimetypes
 import os
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, nullcontext
 from pathlib import Path, PurePosixPath
 import re
@@ -19,6 +20,8 @@ from fastapi import HTTPException
 
 REQUIRED = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_ENDPOINT_URL_S3",
             "AWS_REGION", "NIT_STORAGE_BUCKET")
+PDF_UPLOAD_LIMIT = 60 * 1024 * 1024
+PPTX_UPLOAD_LIMIT = 40 * 1024 * 1024
 MAX_FILES = 300
 MAX_TOTAL_BYTES = 180 * 1024 * 1024
 MAX_MANIFEST_BYTES = 200 * 1024
@@ -144,35 +147,41 @@ class PrivateArtifactStore:
     def publish_new(self, folder: Path, course_id: str, material_id: str):
         """Publish immutable files, then commit the manifest as the last object."""
         prefix = self.prefix(course_id, material_id)
-        entries = []
-        uploaded = []
         files = sorted(p for p in folder.rglob("*") if p.is_file())
         if len(files) < 2 or len(files) > MAX_FILES:
             raise HTTPException(503, "Invalid parsed material file count")
-        total = 0
+        artifacts = []
+        for path in files:
+            if path.is_symlink():
+                raise HTTPException(503, "Symlink in parsed material")
+            relative = _safe_name(path.relative_to(folder).as_posix())
+            artifacts.append((path, relative, path.stat().st_size))
+        names = {relative for _, relative, _ in artifacts}
+        if not names.intersection({"source.pdf", "source.pptx"}) or "parsed/document.json" not in names:
+            raise HTTPException(503, "Missing required canonical artifacts")
+        if sum(size for _, _, size in artifacts) > MAX_TOTAL_BYTES:
+            raise HTTPException(503, "Material exceeds private storage limit")
+
+        def upload(artifact):
+            path, relative, size = artifact
+            key = prefix + "/files/" + relative
+            kind = mimetypes.guess_type(relative)[0] or "application/octet-stream"
+            with path.open("rb") as stream:
+                digest = hashlib.file_digest(stream, "sha256").hexdigest()
+                stream.seek(0)
+                self._put(key, stream, kind)
+            return {"path": relative, "key": key, "size": size, "sha256": digest}
+
         try:
-            for path in files:
-                relative = _safe_name(path.relative_to(folder).as_posix())
-                if path.is_symlink():
-                    raise HTTPException(503, "Symlink in parsed material")
-                raw = path.read_bytes()
-                total += len(raw)
-                if total > MAX_TOTAL_BYTES:
-                    raise HTTPException(503, "Material exceeds private storage limit")
-                key = prefix + "/files/" + relative
-                kind = mimetypes.guess_type(relative)[0] or "application/octet-stream"
-                self._put(key, raw, kind)
-                uploaded.append(key)
-                entries.append({"path": relative, "key": key, "size": len(raw),
-                                "sha256": _sha(raw)})
-            if not any(x["path"].startswith("source.") for x in entries) or not any(x["path"] == "parsed/document.json" for x in entries):
-                raise HTTPException(503, "Missing required canonical artifacts")
-            manifest = {"schema": "learningx-artifacts-v1", "files": entries}
-            self._save_manifest(prefix, manifest)
-            return self.ref(prefix)
+            # Bound concurrent uploads; streams avoid extra copies of large files.
+            # The manifest is published only after every upload has completed.
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                entries = list(pool.map(upload, artifacts))
+            self._save_manifest(prefix, {"schema": "learningx-artifacts-v1", "files": entries})
         except Exception:
-            self._garbage_collect_partial(uploaded)
+            self._garbage_collect_partial([prefix + "/files/" + name for name in names])
             raise
+        return self.ref(prefix)
 
     @contextmanager
     def workspace(self, record):

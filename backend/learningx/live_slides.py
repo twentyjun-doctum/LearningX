@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .private_store import has_material_artifact, read_material_artifact
+from .private_store import PDF_UPLOAD_LIMIT, PPTX_UPLOAD_LIMIT, has_material_artifact, read_material_artifact
 from .storage import uid
 from .storage import Base
 
@@ -98,7 +98,7 @@ def _source(identity):
     record = SimpleNamespace(id=material_id, course_id=course_id, out_dir=out_dir)
     name = "source.pdf" if suffix == ".pdf" else "parsed/live-preview.pdf"
     try:
-        return read_material_artifact(record, name, 40 * 1024 * 1024)
+        return read_material_artifact(record, name, PDF_UPLOAD_LIMIT if suffix == ".pdf" else PPTX_UPLOAD_LIMIT)
     except HTTPException as exc:
         if suffix == ".pptx" and exc.status_code == 404:
             raise HTTPException(409, "LIVE_PREVIEW_UNAVAILABLE") from exc
