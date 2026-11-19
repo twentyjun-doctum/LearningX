@@ -100,5 +100,14 @@
     return Math.floor(s / 3600) + '시간 전';
   }
 
-  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime };
+  const traceEnabled = new URLSearchParams(location.search).get('liveTiming') === '1';
+  function liveMark(stage, version, page, startTime = performance.now()) {
+    if (!traceEnabled || !version) return;
+    performance.mark('question-up:' + stage, {
+      startTime,
+      detail: {version, page, epochMs: performance.timeOrigin + startTime},
+    });
+  }
+
+  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime, liveMark };
 })();

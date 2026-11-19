@@ -3,7 +3,7 @@
    토큰은 메모리에만 둡니다. 새로고침하면 현재 체험 수업 관리 세션이 종료됩니다. */
 (() => {
   'use strict';
-  const { el, client, LEVEL, relTime } = window.QU;
+  const { el, client, LEVEL, relTime, liveMark } = window.QU;
   const $ = (id) => document.getElementById(id);
 
   const MAX_APPROVAL_ITEMS = 1000;
@@ -482,7 +482,8 @@
     const view = liveView;
     if (!live || !view || !Number.isInteger(page) || page < 1 || page > (view.total() ?? Infinity)) return;
     live.requestedPage = page;
-    live.publishAfter = performance.now() + 80;
+    live.requestedAt = performance.now();
+    live.publishAfter = live.requestedAt + 80;
     live.lastRequestedPage = page;
     view.select(page);
     if (live.sendingPage) return;
@@ -496,7 +497,11 @@
         }
         const next = live.requestedPage;
         live.requestedPage = undefined;
-        const options = {method: 'PUT', body: {page: next, batch_id: crypto.randomUUID()}, timeout: 8000};
+        const batchId = crypto.randomUUID();
+        const version = batchId + ':0';
+        const options = {method: 'PUT', body: {page: next, batch_id: batchId}, timeout: 8000};
+        liveMark?.('teacher-action', version, next, live.requestedAt);
+        liveMark?.('publish-start', version, next);
         try {
           const url = `/v1/sessions/${live.session.id}/live`;
           const result = await api(url, options).catch(err => {
@@ -504,6 +509,7 @@
                 live.requestedPage === undefined) return api(url, options);
             throw err;
           });
+          liveMark?.('publish-response', version, next);
           view.acknowledge(result);
           setError($('global-error'), null);
         } catch (err) {

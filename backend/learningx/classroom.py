@@ -33,7 +33,7 @@ from . import private_store
 from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_next_page
 from .security import actor, issue_token, require_course, scheme, session
-from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
+from .storage import Audit, Base, Course, Material, Member, Question, Revision, SessionLocal, User, uid
 
 router = APIRouter(prefix="/v1")
 
@@ -365,19 +365,27 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
     return _public_session(db, s, faculty=True)
 
 
+def _read_live(request, credentials, session_id, version, cursor, *, access_only=False):
+    # Keep checkout, authorization and release on one worker. A parked poll must
+    # not hold a connection while it queues for a worker to build its response.
+    with SessionLocal() as db:
+        user = actor(request, credentials, db)
+        if access_only:
+            _live_access(db, session_id, user)
+            return
+        return _snapshot(db, session_id, user, version, cursor)
+
+
 @router.get("/sessions/{session_id}/live")
 async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
                         after: str | None = None, index_version: str = "", cursor: str | None = None,
-                        db: Session = Depends(session), user: User = Depends(actor),
-                        credentials: HTTPAuthorizationCredentials = Depends(scheme)):
+                        credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     if after is not None and after == revision(session_id) and (cursor is None or cursor == version):
-        await run_in_threadpool(_live_access, db, session_id, user)
-        await run_in_threadpool(db.rollback)
+        await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor, access_only=True)
         await wait_for_update(session_id, after)
-        user = await run_in_threadpool(actor, request, credentials, db)
     stamp = revision(session_id)
+    snapshot = await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor)
     response.headers["Cache-Control"] = "no-store"
-    snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version, cursor)
     index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
     if index_version == index_stamp:
         del snapshot["index"]

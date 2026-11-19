@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const {el, LEVEL} = window.QU;
+  const {el, LEVEL, liveMark} = window.QU;
   const pdfBase = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
   let pdfLibrary;
   function warmPdf() {
@@ -324,7 +324,9 @@
       }
       if (downloads.has(key)) return downloads.get(key);
       const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
+      if (!faculty) liveMark?.('pdf-request', target.version, number);
       const pending = api(url, {raw: true, timeout: 12000}).then(res => res.arrayBuffer()).then(bytes => {
+        if (!faculty) liveMark?.('pdf-received', target.version, number);
         if (!stopped && (faculty || target.version === slide?.version) && bytes.byteLength <= pageCacheLimit) {
           while (retainedBytes + bytes.byteLength > pageCacheLimit || pageFiles.size >= 8) {
             const oldest = pageFiles.keys().next().value;
@@ -416,6 +418,7 @@
       page.textContent = target.page + ' / ' + target.total;
       status.textContent = '동기화 중';
       content.replaceChildren(frame);
+      if (!faculty) liveMark?.('student-display', target.version, target.page);
       marksKey = '';
       paintIndex();
       if (deck) {
@@ -446,6 +449,7 @@
             retainedBytes = 0;
           }
           slide = data.slide;
+          if (!faculty && slide) liveMark?.('student-detected', slide.version, slide.page);
           if (slide?.visible_pages) visiblePages = slide.visible_pages;
           if (selected === null || slide?.page === selected) navigation = slide;
         }
