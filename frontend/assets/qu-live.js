@@ -74,6 +74,9 @@
     let renderId = 0;
     let activeRender = null;
     let retryAfter = 0;
+    let cursor = slide?.version;
+    let playing = false;
+    const transitions = [];
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -273,9 +276,44 @@
       const render = display(target).finally(() => {
         if (activeRender !== render) return;
         activeRender = null;
-        retryAfter = performance.now() + 350;
+        retryAfter = transitions.length ? 0 : performance.now() + 350;
+        if (transitions.length) playTransitions();
       });
       activeRender = render;
+    }
+
+    async function playTransitions() {
+      if (playing || activeRender || stopped || performance.now() < retryAfter) return;
+      playing = true;
+      try {
+        while (!stopped && transitions.length) {
+          const target = transitions[0];
+          // Download up to two upcoming pages while the current frame renders.
+          for (const next of transitions.slice(1, 3)) {
+            if (next.pdf) pageBytes(next, next.page).catch(() => {});
+          }
+          let shown = await display(target);
+          for (const delay of [180, 400]) {
+            if (shown || stopped) break;
+            await new Promise(resolve => setTimeout(resolve, delay));
+            if (!stopped) shown = await display(target);
+          }
+          if (stopped) break;
+          if (!shown) {
+            if (transitions.length === 1) {
+              retryAfter = performance.now() + 350;
+              break;
+            }
+            await display({page: target.page, total: target.total, text: '이 페이지를 불러오지 못했습니다.'});
+          }
+          transitions.shift();
+          if (transitions.length) {
+            await new Promise(resolve => setTimeout(resolve, transitions.length > 4 ? 34 : 70));
+          }
+        }
+      } finally {
+        playing = false;
+      }
     }
 
     async function display(target) {
@@ -331,6 +369,7 @@
           if (number) pageFrame(target, number, w, h).catch(() => {});
         }
       }
+      return true;
     }
 
     async function tick() {
@@ -339,6 +378,7 @@
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
+        if (!faculty && cursor) params.set('cursor', cursor);
         const data = await api(path + '?' + params, {timeout: 10000});
         if (stopped) return;
         stamp = data.revision;
@@ -353,11 +393,20 @@
         if (data.index) items = data.index;
         open = data.status === 'OPEN';
         confusion = data.confusion;
-        if (changed && (selected === null || data.status === 'CLOSED')) {
+        if (!faculty && data.status === 'CLOSED') {
+          transitions.length = 0;
+          follow(null);
+        } else if (!faculty && slide && data.transitions?.length) {
+          transitions.push(...data.transitions);
+          cursor = data.transitions.at(-1).version;
+          if (changed) retryAfter = 0;
+          playTransitions();
+        } else if (!faculty && (playing || transitions.length)) {
+          playTransitions();
+        } else if (changed && (selected === null || data.status === 'CLOSED')) {
+          if (!faculty) cursor = slide?.version;
           follow(slide);
         } else if (!faculty && slide && displayed !== slide.page && !activeRender && performance.now() >= retryAfter) {
-          // A temporary file/network error can occur while the page version
-          // stays unchanged. Reuse its full metadata and retry on live refresh.
           follow(slide);
         }
         if (selected === slide?.page) selected = null;

@@ -106,6 +106,8 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  const error = status => Object.assign(new Error('fixture HTTP '+status),{status});
  const slide = (page, version, after) => ({page, version, after, total:9, pdf:true});
  let latest = slide(1,'v1',2);
+ const timeline = [latest];
+ const painted = [];
  let confusion;
  const css = fs.readFileSync(path.join(root, 'assets/qu.css'), 'utf8');
  assert.doesNotMatch(css, /:fullscreen[^{}]*\.live-marks[^{}]*\{[^{}]*display:\s*none/);
@@ -118,14 +120,19 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  const replace = content.replaceChildren.bind(content);
  content.replaceChildren = (...nodes) => {
   replace(...nodes);
-  if (nodes.length) lastRendered = panel.querySelector('[data-live-page]').textContent;
+  if (nodes.length) {
+   lastRendered = panel.querySelector('[data-live-page]').textContent;
+   painted.push(lastRendered);
+  }
  };
  let clock = 0;
  const api = async path => {
   const url = new URL(path,'https://fixture.local');
   if (!url.pathname.includes('/page/')) {
    await new Promise(resolve => setTimeout(resolve,8));
-   return {status:'OPEN', slide:latest, index:[], revision:latest.version, confusion};
+   const cursor = timeline.findIndex(item=>item.version===url.searchParams.get('cursor'));
+   return {status:'OPEN', slide:latest, index:[], revision:latest.version, confusion,
+    transitions: cursor >= 0 ? timeline.slice(cursor+1) : []};
   }
   calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
   if (url.pathname.endsWith('/v1') && url.searchParams.get('page') === '2') return oldPrefetch;
@@ -156,11 +163,10 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  }
  try {
   await until(()=>calls.some(([v,p])=>v==='v1'&&p===2) && view.page()===1,'old prefetch remains in flight');
-  latest = slide(6,'v2',7);
-  await until(()=>calls.some(([v])=>v==='v2'),'student receives first rapid transition');
-  latest = slide(8,'v3',9);
   latest = slide(2,'v4',3);
+  timeline.push(slide(6,'v2',7),slide(8,'v3',9),latest);
   await until(()=>view.page()===2,'student retries the latest page without another teacher transition');
+  assert.deepEqual(painted,['1 / 9','6 / 9','8 / 9','2 / 9']);
   assert.equal(calls.filter(([v,p])=>v==='v4'&&p===2).length,2);
   releaseOld(response);
   await new Promise(resolve=>setTimeout(resolve,25));

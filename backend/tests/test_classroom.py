@@ -155,6 +155,14 @@ class ClassroomTests(unittest.TestCase):
         next_pdf = self.req("GET", prefetch, student, params={"page": 3})
         with pymupdf.open(stream=next_pdf.content, filetype="pdf") as pdf:
             self.assertEqual(pdf[0].get_text().strip(), "Next slide text")
+        batch = {"pages": [3, 1, 3], "batch_id": "6e2f3169-9826-42cd-82ec-fb3748478933"}
+        for _ in range(2):
+            self.assertEqual(self.req("PUT", path, self.tf, json=batch).status_code, 200)
+        ordered = self.req("GET", path, student, params={"cursor": initial["slide"]["version"]}).json()["transitions"]
+        self.assertEqual([item["page"] for item in ordered], [3, 1, 3])
+        old_page = path + "/page/" + ordered[0]["version"]
+        self.assertEqual(self.req("GET", old_page, student).status_code, 200)
+        self.assertEqual(self.req("GET", old_page, student, params={"page": 4}).status_code, 403)
         before = initial["revision"]
         self.assertEqual(self.req("PUT", path, self.tf, json={"page": 1}).status_code, 200)
         state = self.req("GET", path, student, params={"after": before}).json()
