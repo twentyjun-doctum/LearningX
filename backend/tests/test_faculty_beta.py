@@ -23,6 +23,13 @@ class FacultyBetaTests(unittest.TestCase):
     def test_guest_classroom_with_real_parser(self):
         self._check_upload_and_review(guest=True)
 
+    def test_guest_sessions_can_exceed_previous_daily_limit(self):
+        origin = "https://learning-x-one.vercel.app"
+        with TestClient(app) as client, patch.dict(os.environ, {"NIT_CORS_ORIGINS": origin}):
+            responses = [client.post("/v1/faculty/guest", headers={"Origin": origin}) for _ in range(21)]
+        self.assertEqual([response.status_code for response in responses], [201] * 21)
+        self.assertEqual(len({response.json()["access_token"] for response in responses}), 21)
+
     def _check_upload_and_review(self, guest):
         with fitz.open() as pdf:
             cover = pdf.new_page()
