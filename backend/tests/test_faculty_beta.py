@@ -45,7 +45,11 @@ class FacultyBetaTests(unittest.TestCase):
                 "coverage before and after the change in public attention.",
                 fontsize=14,
             )
+            if guest:
+                pdf.embfile_add("test-padding.bin", os.urandom(60 * 1024 * 1024 - 64 * 1024))
             payload = pdf.tobytes()
+        if guest:
+            assert 40 * 1024 * 1024 < len(payload) <= 60 * 1024 * 1024
 
         env = {
             "NIT_WORKER_BACKEND": "northflank_poll",
@@ -88,6 +92,12 @@ class FacultyBetaTests(unittest.TestCase):
                 assert course.status_code == 201, course.text
                 course_id = course.json()["id"]
                 uploads = f"/v1/courses/{course_id}/uploads"
+                if guest:
+                    for filename, limit in (("lesson.pdf", 60), ("lesson.pptx", 40)):
+                        rejected = client.post(uploads + "/initiate", headers=headers, json={
+                            "filename": filename, "size_bytes": limit * 1024 * 1024 + 1,
+                        })
+                        assert rejected.status_code == 413, rejected.text
                 init = client.post(uploads + "/initiate", headers=headers, json={
                     "filename": "lesson.pdf", "size_bytes": len(payload),
                 })
@@ -128,4 +138,15 @@ class FacultyBetaTests(unittest.TestCase):
                     assert opened.status_code == 201, opened.text
                     code = opened.json()["join_code"]
                     assert len(code) == 6
-                    assert client.post("/v1/join", json={"code": code}).status_code == 200
+                    joined = client.post("/v1/join", json={"code": code})
+                    assert joined.status_code == 200
+                    live = f"/v1/sessions/{opened.json()['id']}/live"
+                    full = client.get(live + "/document", headers=headers)
+                    assert full.status_code == 200 and full.content == payload
+                    slide = joined.json()["initial_live"]["slide"]
+                    student_headers = {"Authorization": "Bearer " + joined.json()["access_token"]}
+                    page = client.get(live + "/page/" + slide["version"], headers=student_headers)
+                    assert page.status_code == 200
+                    with fitz.open(stream=page.content, filetype="pdf") as rendered:
+                        assert len(rendered) == 1
+                        assert "Media Literacy" in rendered[0].get_text()

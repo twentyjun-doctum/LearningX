@@ -6,6 +6,8 @@ from tempfile import TemporaryDirectory
 
 import pymupdf
 
+from .private_store import PPTX_UPLOAD_LIMIT
+
 
 def generate_preview(original: Path, parsed: Path, page_count: int) -> bool:
     # The canonical numbering includes hidden slides. Access is restricted by
@@ -21,7 +23,7 @@ def generate_preview(original: Path, parsed: Path, page_count: int) -> bool:
                 "--outdir", tmp, str(original),
             ], env={"PATH": os.defpath, "HOME": tmp, "LANG": "C.UTF-8"}, timeout=45, check=True,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            if exported.stat().st_size > 40 * 1024 * 1024:
+            if exported.stat().st_size > PPTX_UPLOAD_LIMIT:
                 return False
             with pymupdf.open(exported) as doc:
                 if len(doc) != page_count:

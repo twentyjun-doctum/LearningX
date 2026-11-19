@@ -10,7 +10,6 @@ from .storage import User
 
 router = APIRouter()
 GUEST_DOMAIN = "@guest.question-up.local"
-GUEST_UPLOAD_LIMIT = 40 * 1024 * 1024
 
 
 def is_guest(user):
