@@ -481,26 +481,34 @@
     const live = state.live;
     const view = liveView;
     if (!live || !view || !Number.isInteger(page) || page < 1 || page > (view.total() ?? Infinity)) return;
-    (live.requestedPages ??= []).push(page);
+    live.requestedPage = page;
+    live.publishAfter = performance.now() + 80;
     live.lastRequestedPage = page;
     view.select(page);
     if (live.sendingPage) return;
     live.sendingPage = true;
     try {
-      while (live.requestedPages.length && state.live === live && liveView === view) {
-        const pages = live.requestedPages.splice(0, 16);
-        const options = {method: 'PUT', body: {pages, batch_id: crypto.randomUUID()}, timeout: 8000};
+      while (live.requestedPage !== undefined && state.live === live && liveView === view) {
+        const wait = live.publishAfter - performance.now();
+        if (wait > 0) {
+          await new Promise(resolve => setTimeout(resolve, wait));
+          continue;
+        }
+        const next = live.requestedPage;
+        live.requestedPage = undefined;
+        const options = {method: 'PUT', body: {page: next, batch_id: crypto.randomUUID()}, timeout: 8000};
         try {
           const url = `/v1/sessions/${live.session.id}/live`;
           const result = await api(url, options).catch(err => {
-            if ((err.status === 0 || err.status >= 500) && state.live === live && liveView === view) return api(url, options);
+            if ((err.status === 0 || err.status >= 500) && state.live === live && liveView === view &&
+                live.requestedPage === undefined) return api(url, options);
             throw err;
           });
           view.acknowledge(result);
           setError($('global-error'), null);
         } catch (err) {
           if (state.live !== live || liveView !== view) return;
-          if (!live.requestedPages.length) {
+          if (live.requestedPage === undefined) {
             live.lastRequestedPage = undefined;
             view.reconcile();
           }

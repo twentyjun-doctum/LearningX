@@ -72,13 +72,9 @@
     let indexVersion;
     let items = initial?.index ?? [];
     let renderId = 0;
-    let activeRender = null;
-    let retryAfter = 0;
-    let cursor = slide?.version;
-    let playing = false;
-    const transitions = [];
-    let armCatchup;
-    let initialCatchup;
+    let activeRender;
+    let retryTimer;
+    let retryCount = 0;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -338,72 +334,20 @@
     }
 
     function follow(target) {
-      const render = display(target).finally(() => {
-        if (activeRender !== render) return;
-        activeRender = null;
-        clearTimeout(initialCatchup);
-        initialCatchup = undefined;
-        retryAfter = transitions.length ? 0 : performance.now() + 350;
-        if (transitions.length) playTransitions();
-      });
+      clearTimeout(retryTimer);
+      const render = display(target);
       activeRender = render;
-    }
-
-    async function showTransition(target) {
-      let timer;
-      const budget = new Promise(resolve => {
-        armCatchup = () => {
-          if (transitions.length > 1 && timer === undefined) {
-            timer = setTimeout(() => resolve('behind'), 450);
-          }
-        };
-        armCatchup();
-      });
-      try {
-        const shown = await Promise.race([display(target), budget]);
-        if (shown === 'behind') ++renderId; // Ignore a late frame, but keep its cached file.
-        return shown;
-      } finally {
-        clearTimeout(timer);
-        armCatchup = null;
-      }
-    }
-
-    async function playTransitions() {
-      if (playing || activeRender || stopped || performance.now() < retryAfter) return;
-      playing = true;
-      try {
-        while (!stopped && transitions.length) {
-          const target = transitions[0];
-          const current = showTransition(target);
-          // Overlap one lookahead canvas and one extra download. Keep render
-          // concurrency bounded on slower student devices.
-          const next = transitions[1];
-          if (next?.pdf) pageFrame(next, next.page, width(), height()).catch(() => {});
-          const later = transitions[2];
-          if (later?.pdf) pageBytes(later, later.page).catch(() => {});
-          let shown = await current;
-          for (const delay of [180, 400]) {
-            if (shown || stopped || transitions.length > 1) break;
-            await new Promise(resolve => setTimeout(resolve, delay));
-            if (!stopped) shown = await showTransition(target);
-          }
-          if (stopped) break;
-          if (shown === 'behind' || !shown) {
-            if (transitions.length === 1) {
-              retryAfter = performance.now() + 350;
-              break;
-            }
-            await display({page: target.page, total: target.total, text: '이전 페이지 로딩 지연 · 최신 페이지로 이동 중'});
-          }
-          transitions.shift();
-          if (transitions.length) {
-            await new Promise(resolve => setTimeout(resolve, transitions.length > 2 ? 24 : 42));
-          }
+      render.then(shown => {
+        if (activeRender !== render || stopped) return;
+        activeRender = null;
+        if (shown || faculty || !target || target.version !== slide?.version) {
+          retryCount = 0;
+          return;
         }
-      } finally {
-        playing = false;
-      }
+        retryTimer = setTimeout(() => {
+          if (!stopped && target.version === slide?.version) follow(target);
+        }, Math.min(350 * 2 ** retryCount++, 2000));
+      });
     }
 
     async function display(target) {
@@ -469,7 +413,6 @@
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
-        if (!faculty && cursor) params.set('cursor', cursor);
         const data = await api(path + '?' + params, {timeout: 10000});
         if (stopped) return;
         stamp = data.revision;
@@ -484,32 +427,8 @@
         if (data.index) items = data.index;
         open = data.status === 'OPEN';
         confusion = data.confusion;
-        if (!faculty && data.status === 'CLOSED') {
-          transitions.length = 0;
-          follow(null);
-        } else if (!faculty && slide && data.transitions?.length) {
-          transitions.push(...data.transitions);
-          armCatchup?.();
-          if (activeRender && initialCatchup === undefined) {
-            const waiting = activeRender;
-            initialCatchup = setTimeout(() => {
-              initialCatchup = undefined;
-              if (stopped || activeRender !== waiting) return;
-              ++renderId;
-              activeRender = null;
-              retryAfter = 0;
-              playTransitions();
-            }, 450);
-          }
-          cursor = data.transitions.at(-1).version;
-          if (changed) retryAfter = 0;
-          playTransitions();
-        } else if (!faculty && (playing || transitions.length)) {
-          playTransitions();
-        } else if (changed && (selected === null || data.status === 'CLOSED')) {
-          if (!faculty) cursor = slide?.version;
-          follow(slide);
-        } else if (!faculty && slide && displayed !== slide.page && !activeRender && performance.now() >= retryAfter) {
+        if (changed && (selected === null || data.status === 'CLOSED')) {
+          retryCount = 0;
           follow(slide);
         }
         if (selected === slide?.page) selected = null;
@@ -540,7 +459,7 @@
     function stop() {
       stopped = true;
       clearTimeout(timer);
-      clearTimeout(initialCatchup);
+      clearTimeout(retryTimer);
       document.removeEventListener('selectionchange', updateSelection);
       content.removeEventListener('click', pickPoint);
       content.removeEventListener('pointerdown', beginDrag);
