@@ -132,7 +132,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   }
  };
  let clock = 0;
- const api = async path => {
+ const api = async (path, {readBody} = {}) => {
   const url = new URL(path,'https://fixture.local');
   if (!url.pathname.includes('/page/')) {
    await new Promise(resolve => setTimeout(resolve,8));
@@ -141,12 +141,12 @@ console.log('OK: API origin confinement protects invite codes and tokens');
     transitions: cursor >= 0 ? timeline.slice(cursor+1) : []};
   }
   calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
-  if (url.pathname.endsWith('/v6')) return stalled;
+  if (url.pathname.endsWith('/v6')) return readBody(await stalled);
   if (url.pathname.endsWith('/v4') && !failedLatest) {
    failedLatest = true;
    throw error(503);
   }
-  return response;
+  return readBody(response);
  };
  const page = {getViewport:({scale})=>({width:100*scale,height:100*scale,scale}),
   render:()=>({promise:Promise.resolve()}),streamTextContent(){}};

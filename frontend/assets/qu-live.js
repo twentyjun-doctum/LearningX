@@ -325,7 +325,13 @@
       if (downloads.has(key)) return downloads.get(key);
       const url = path + '/page/' + encodeURIComponent(target.version) + '?page=' + number;
       if (!faculty) liveMark?.('pdf-request', target.version, number);
-      const pending = api(url, {raw: true, timeout: 12000}).then(res => res.arrayBuffer()).then(bytes => {
+      const pending = api(url, {
+        timeout: 12000,
+        readBody: response => {
+          if (!faculty) liveMark?.('pdf-headers', target.version, number);
+          return response.arrayBuffer();
+        },
+      }).then(bytes => {
         if (!faculty) liveMark?.('pdf-received', target.version, number);
         if (!stopped && (faculty || target.version === slide?.version) && bytes.byteLength <= pageCacheLimit) {
           while (retainedBytes + bytes.byteLength > pageCacheLimit || pageFiles.size >= 8) {
@@ -337,6 +343,9 @@
           retainedBytes += bytes.byteLength;
         }
         return bytes;
+      }).catch(err => {
+        if (!faculty) liveMark?.(err.detail === 'timeout' ? 'pdf-timeout' : 'pdf-error', target.version, number);
+        throw err;
       }).finally(() => downloads.delete(key));
       downloads.set(key, pending);
       return pending;
@@ -404,6 +413,7 @@
         status.textContent = '교안 화면을 불러오지 못했습니다.';
         return;
       }
+      if (!faculty && frame) liveMark?.('student-render-ready', target.version, target.page);
       while (drag && !stopped && id === renderId) await drag.done;
       if (stopped || id !== renderId) return;
       if (faculty && !frame) return;

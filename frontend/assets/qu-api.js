@@ -42,7 +42,7 @@
 
   function client(getToken, onUnauthorized) {
     const base = apiBase();
-    return async function request(path, { method = 'GET', body, raw = false, timeout = 60000 } = {}) {
+    return async function request(path, { method = 'GET', body, raw = false, readBody, timeout = 60000 } = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
       try {
@@ -65,6 +65,14 @@
           try { detail = (await response.json()).detail || ''; } catch (_) { /* ignore */ }
           if (response.status === 401 && onUnauthorized) onUnauthorized();
           throw new ApiError(response.status, detail);
+        }
+        if (readBody) {
+          try {
+            return await readBody(response);
+          } catch (err) {
+            if (controller.signal.aborted) throw new ApiError(0, 'timeout');
+            throw err;
+          }
         }
         if (raw) return response;
         return await response.json();
