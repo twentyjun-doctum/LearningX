@@ -59,8 +59,17 @@
         <input id="course-title" class="input" placeholder="예: 3주차 · 의제설정 이론" maxlength="180">
       </div>
       <div class="field">
-        <label for="upload-file">교안 파일 (PDF·PPTX, 40MB까지)</label>
-        <input id="upload-file" class="input" type="file" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+        <span class="file-picker-title" id="upload-file-title">교안 파일</span>
+        <input id="upload-file" class="sr-only" type="file" aria-labelledby="upload-file-title upload-picker-action"
+          aria-describedby="upload-picker-meta" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+        <label class="file-picker" for="upload-file" id="upload-picker">
+          <span class="file-picker-icon" aria-hidden="true"></span>
+          <span class="file-picker-copy" aria-live="polite">
+            <strong id="upload-picker-name">교안을 여기에 놓으세요</strong>
+            <span id="upload-picker-meta">PDF 또는 PPTX · 최대 40MB</span>
+          </span>
+          <span class="file-picker-action" id="upload-picker-action">파일 선택</span>
+        </label>
       </div>
       <div class="card tight stack" id="upload-progress" hidden>
         <div class="row between"><b id="upload-name"></b><span class="muted" id="upload-state"></span></div>
@@ -85,15 +94,15 @@
       <div class="stat"><div class="k">이미 승인됨</div><div class="v" id="cand-approved">–</div></div>
     </div>
     <p class="notice" id="media-notice" hidden>이 교안의 내레이션 오디오나 도표는 분석되지 않아 코칭에 쓰이지 않습니다.</p>
+    <div class="card tight prepare-consent">
+      <label class="check"><input type="checkbox" id="ai-consent">이 수업에서 학생 질문 코칭에 AI를 사용합니다. AI는 정답을 알려 주지 않고, 승인한 근거로 되묻기만 합니다.</label>
+    </div>
     <div class="list">
       <div class="head row between"><span>교안 내용</span><button class="btn sm" type="button" id="select-all">모두 선택</button></div>
       <p class="muted small">코칭에 사용할 내용을 한 번에 최대 1,000개 선택해 주세요. 다시 승인하면 선택한 내용으로 승인 범위가 바뀝니다.</p>
       <div id="candidate-list"></div>
     </div>
-    <div class="card tight stack">
-      <label class="check" id="media-ack-row" hidden><input type="checkbox" id="media-ack">분석되지 않은 오디오·도표가 있다는 것을 확인했습니다.</label>
-      <label class="check"><input type="checkbox" id="ai-consent">이 수업에서 학생 질문 코칭에 AI를 사용합니다. AI는 정답을 알려 주지 않고, 승인한 근거로 되묻기만 합니다.</label>
-    </div>
+    <label class="card tight check" id="media-ack-row" hidden><input type="checkbox" id="media-ack">분석되지 않은 오디오·도표가 있다는 것을 확인했습니다.</label>
     <p class="error" id="prepare-error" hidden></p>
   </section>
 

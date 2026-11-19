@@ -115,6 +115,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 .list>.item{display:flex;align-items:center;gap:16px;padding:18px 24px;border-bottom:1px solid var(--border)}
 .list>.item:last-child{border-bottom:0}
 .list>.head{background:#F7FAF8;padding:12px 24px;font-size:13px;color:var(--text-sub);font-weight:500}
+.prepare-consent {position:sticky; top:64px; z-index:6; box-shadow:var(--shadow-xs);}
 .candidate{display:flex;gap:14px;align-items:flex-start;padding:14px 20px;border-bottom:1px solid var(--border);cursor:pointer}
 .candidate:last-child{border-bottom:0}
 .candidate input{width:18px;height:18px;margin-top:3px;accent-color:var(--primary);flex:none}
@@ -264,3 +265,36 @@ html.live-selecting {overflow: hidden; overflow-anchor: none;}
 .live-highlight.confused {background: #ffad365e;}
 .live-highlight.picked {background: #5075dc55;}
 .live-mark:not(.picked) {width: 1.35rem; height: 1.35rem; display: grid; place-items: center; color: white; font-size: .67rem;}
+
+/* Faculty lesson file picker */
+.file-picker-title {font-weight:700;}
+.file-picker {
+  display:grid; grid-template-columns:auto minmax(0, 1fr) auto; gap:12px; align-items:center;
+  padding:16px; min-height:84px; border:1px dashed var(--border-strong);
+  border-radius:var(--radius-xl); background:var(--surface-chat); cursor:pointer;
+}
+.file-picker:hover,.file-picker.is-dragging,.file-picker.has-file {
+  border-color:var(--sage-600); background:var(--primary-soft);
+}
+#upload-file:focus-visible + .file-picker {outline:2px solid var(--primary); outline-offset:3px;}
+#upload-file[aria-invalid="true"] + .file-picker {border-color:var(--danger);}
+.file-picker-copy {min-width:0; display:grid; gap:2px;}
+.file-picker-copy strong {overflow-wrap:anywhere;}
+.file-picker-copy span {font-size:.86rem; color:var(--text-sub);}
+.file-picker-icon {
+  width:28px; height:34px; position:relative; border:2px solid var(--primary);
+  border-radius:var(--radius-sm); background:var(--surface);
+}
+.file-picker-icon::before {
+  content:""; position:absolute; top:10px; right:5px; left:5px;
+  height:2px; background:var(--primary); box-shadow:0 6px var(--primary),0 12px var(--primary);
+}
+.file-picker-action {
+  padding:6px 10px; color:var(--primary-strong); background:var(--surface);
+  border:1px solid var(--border); border-radius:var(--radius-md); font-weight:700; white-space:nowrap;
+}
+#upload-form:has(#upload-submit:disabled) .file-picker {cursor:default; opacity:.68;}
+@media (max-width:420px) {
+  .file-picker {grid-template-columns:auto minmax(0, 1fr); gap:8px 10px; padding:12px;}
+  .file-picker-action {grid-column:2; justify-self:start;}
+}

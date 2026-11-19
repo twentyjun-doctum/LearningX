@@ -182,12 +182,71 @@
     show($('course-title-field'), !course);
     $('course-title').value = '';
     $('upload-file').value = '';
+    $('upload-file').removeAttribute('aria-invalid');
+    $('upload-picker').classList.remove('is-dragging');
+    paintPicker();
     $('upload-rights').checked = false;
     show($('upload-progress'), false);
     setError($('upload-error'), null);
     $('upload-submit').disabled = false;
     (course ? $('upload-file') : $('course-title')).focus();
   }
+
+  function paintPicker(file) {
+    $('upload-picker').classList.toggle('has-file', Boolean(file));
+    $('upload-picker-name').textContent = file?.name ?? '교안을 여기에 놓으세요';
+    $('upload-picker-meta').textContent = file
+      ? (file.size >= 1024 * 1024 ? (file.size / (1024 * 1024)).toFixed(1) + ' MB' : Math.ceil(file.size / 1024) + ' KB')
+      : 'PDF 또는 PPTX · 최대 40MB';
+    $('upload-picker-action').textContent = file ? '파일 변경' : '파일 선택';
+  }
+
+  function fileError(file) {
+    if (!file) return '올릴 교안 파일을 골라 주세요.';
+    if (!/\.(pdf|pptx)$/i.test(file.name)) return 'PDF 또는 PPTX 파일만 올릴 수 있습니다.';
+    if (file.size > 40 * 1024 * 1024) return '40MB 이하 파일만 올릴 수 있습니다.';
+    return null;
+  }
+
+  function chooseFile(files) {
+    const upload = state.upload;
+    if (!upload || $('upload-submit').disabled || !files.length) return;
+    const file = files[0];
+    const error = files.length > 1 ? '교안 파일을 한 번에 하나만 선택해 주세요.' : fileError(file);
+    setError($('upload-error'), error);
+    $('upload-file').setAttribute('aria-invalid', String(Boolean(error)));
+    upload.selection = error ? null : file;
+    upload.failed = false;
+    upload.uploadId = null;
+    $('upload-submit').textContent = '올리기';
+    show($('upload-progress'), false);
+    paintPicker(upload.selection);
+  }
+
+  const picker = $('upload-picker');
+  const fileInput = $('upload-file');
+  picker.addEventListener('click', event => { if ($('upload-submit').disabled) event.preventDefault(); });
+  fileInput.addEventListener('change', () => {
+    chooseFile(fileInput.files);
+    fileInput.value = '';
+  });
+  for (const eventName of ['dragenter', 'dragover']) {
+    picker.addEventListener(eventName, event => {
+      if (!event.dataTransfer?.types.includes('Files')) return;
+      event.preventDefault();
+      const busy = $('upload-submit').disabled;
+      event.dataTransfer.dropEffect = busy ? 'none' : 'copy';
+      picker.classList.toggle('is-dragging', !busy);
+    });
+  }
+  picker.addEventListener('dragleave', event => {
+    if (!picker.contains(event.relatedTarget)) picker.classList.remove('is-dragging');
+  });
+  picker.addEventListener('drop', event => {
+    event.preventDefault();
+    picker.classList.remove('is-dragging');
+    if (event.dataTransfer) chooseFile(event.dataTransfer.files);
+  });
 
   function setUploadState(label, pct) {
     show($('upload-progress'), true);
@@ -255,12 +314,11 @@
       return;
     }
 
-    const file = $('upload-file').files[0];
+    const file = u.selection;
     const title = $('course-title').value.trim();
     if (!u.courseId && title.length < 2) return setError($('upload-error'), '수업 이름을 2자 이상 입력해 주세요.');
-    if (!file) return setError($('upload-error'), '올릴 교안 파일을 골라 주세요.');
-    if (!/\.(pdf|pptx)$/i.test(file.name)) return setError($('upload-error'), 'PDF 또는 PPTX 파일만 올릴 수 있습니다.');
-    if (file.size > 40 * 1024 * 1024) return setError($('upload-error'), '40MB 이하 파일만 올릴 수 있습니다.');
+    const problem = fileError(file);
+    if (problem) return setError($('upload-error'), problem);
     if (!$('upload-rights').checked) return setError($('upload-error'), '업로드 권한을 확인해 주세요.');
 
     busy(btn, true, '올리는 중…');
