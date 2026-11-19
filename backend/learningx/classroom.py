@@ -21,7 +21,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
@@ -31,7 +31,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
+from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_next_page
 from .security import actor, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
@@ -298,7 +298,7 @@ def _throttle(request: Request):
 # ---------- faculty endpoints ----------
 
 @router.post("/courses/{course_id}/sessions", status_code=201)
-def open_session(course_id: str, data: OpenSession, db: Session = Depends(session), user: User = Depends(actor)):
+def open_session(course_id: str, data: OpenSession, background_tasks: BackgroundTasks, db: Session = Depends(session), user: User = Depends(actor)):
     require_course(db, course_id, user, "faculty")
     c = db.get(Course, course_id)
     m = db.get(Material, data.material_id)
@@ -315,6 +315,7 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
         raise HTTPException(422, "No visible pages are available")
     first = pages[0]
     total, content = build_snapshot(m, first)
+    db.expunge(m)
     for old in db.query(ClassSession).filter(ClassSession.course_id == course_id,
                                              ClassSession.status != "CLOSED").all():
         old.status = "CLOSED"
@@ -326,6 +327,7 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
     db.add(first_slide)
     _audit(db, user.id, course_id, "session_opened", m.id)
     db.commit()
+    background_tasks.add_task(warm_next_page, m, first, content.get("after"))
     return {**_public_session(db, s, faculty=True),
             "initial_live": {"status": s.status, "slide": {**_slide_metadata(first_slide, faculty=True), "visible_pages": pages},
                              "index": []}}
@@ -523,7 +525,7 @@ def _pdf_response(content):
 
 
 @router.put("/sessions/{session_id}/live")
-def share_slide(session_id: str, data: ShareSlide, request: Request,
+def share_slide(session_id: str, data: ShareSlide, request: Request, background_tasks: BackgroundTasks,
                 db: Session = Depends(session), user: User = Depends(actor),
                 credentials: HTTPAuthorizationCredentials = Depends(scheme)):
     current = _faculty_session(db, session_id, user)
@@ -562,6 +564,7 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
     db.merge(LiveSlide(session_id=session_id, page=page, total=total, version=version, content=encoded))
     db.commit()
     notify(session_id)
+    background_tasks.add_task(warm_next_page, material, content.get("after"))
     return {"page": page, "total": total, **content}
 
 

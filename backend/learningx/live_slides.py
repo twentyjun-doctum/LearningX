@@ -1,5 +1,6 @@
 """Page snapshots for live classrooms. Keep page assets separate from navigation state."""
 import asyncio
+import logging
 from collections import OrderedDict
 from functools import lru_cache
 from threading import Lock
@@ -45,6 +46,13 @@ class QuestionSlide(Base):
 _revisions = OrderedDict()
 _revision_lock = Lock()
 _pdf_lock = Lock()
+_page_cache_lock = Lock()
+_page_cache = OrderedDict()
+_page_cache_bytes = 0
+_PAGE_CACHE_MAX_BYTES = 24 * 1024 * 1024
+_PAGE_CACHE_MAX_PAGES = 12
+_warm_lock = Lock()
+_logger = logging.getLogger(__name__)
 _waiters = {}
 
 
@@ -126,18 +134,48 @@ def build_snapshot(material, page):
     pages = _pages(_identity(material))
     if page not in pages or pages[page]:
         raise HTTPException(422, "Slide does not exist or is hidden")
-    # Only metadata is saved on navigation. The browser requests page bytes
-    # separately and retains pages it has already rendered.
+    # Navigation stores metadata separately from PDF bytes.
     return max(pages), {"pdf": True, "before": max((n for n in pages if n < page and not pages[n]), default=None),
                         "after": min((n for n in pages if n > page and not pages[n]), default=None)}
 
 
-@lru_cache(maxsize=6)
+def _cached_page(key):
+    with _page_cache_lock:
+        content = _page_cache.get(key)
+        if content is not None:
+            _page_cache.move_to_end(key)
+        return content
+
+
 def _page_pdf(identity, page):
+    global _page_cache_bytes
+    key = (identity, page)
+    content = _cached_page(key)
+    if content is not None:
+        return content
+
+    # Recheck inside the PyMuPDF lock so simultaneous viewers share one split.
+    with _pdf_lock:
+        content = _cached_page(key)
+        if content is not None:
+            return content
+        content = _split_page(identity, page)
+        if len(content) <= _PAGE_CACHE_MAX_BYTES:
+            with _page_cache_lock:
+                while (_page_cache_bytes + len(content) > _PAGE_CACHE_MAX_BYTES
+                       or len(_page_cache) >= _PAGE_CACHE_MAX_PAGES):
+                    _, evicted = _page_cache.popitem(last=False)
+                    _page_cache_bytes -= len(evicted)
+                _page_cache[key] = content
+                _page_cache_bytes += len(content)
+        return content
+
+
+def _split_page(identity, page):
     import pymupdf
 
     source = _source(identity)
-    with _pdf_lock, pymupdf.open(stream=source, filetype="pdf") as original, pymupdf.open() as result:
+    with pymupdf.open(stream=source, filetype="pdf") as original, pymupdf.open() as result:
         if page > len(original):
             raise HTTPException(404, "PDF page unavailable")
         result.insert_pdf(original, from_page=page - 1, to_page=page - 1,
@@ -147,3 +185,17 @@ def _page_pdf(identity, page):
 
 def page_pdf(material, page):
     return _page_pdf(_identity(material), page)
+
+
+def warm_next_page(material, *pages):
+    """Best-effort server-side preparation with at most one warmer per process."""
+    if not _warm_lock.acquire(blocking=False):
+        return
+    try:
+        for page in pages:
+            if page is not None:
+                page_pdf(material, page)
+    except Exception:
+        _logger.warning("Could not prepare the next live PDF page")
+    finally:
+        _warm_lock.release()
