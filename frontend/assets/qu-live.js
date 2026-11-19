@@ -77,6 +77,8 @@
     let cursor = slide?.version;
     let playing = false;
     const transitions = [];
+    let armCatchup;
+    let initialCatchup;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -107,13 +109,43 @@
     let marksKey = '';
     let open = initial?.status === 'OPEN';
     let sendingConfusion = false;
+    let drag;
+
+    function beginDrag(event) {
+      if (drag || event.pointerType !== 'mouse' || event.button !== 0 ||
+          !event.target.closest('.live-pdf-text')) return;
+      const x = window.scrollX;
+      const y = window.scrollY;
+      let release;
+      const done = new Promise(resolve => { release = resolve; });
+      const restore = () => {
+        if (window.scrollX !== x || window.scrollY !== y) window.scrollTo(x, y);
+      };
+      drag = {pointer: event.pointerId, done, release, restore};
+      document.documentElement.classList.add('live-selecting');
+      window.addEventListener('scroll', restore);
+    }
+
+    function finishDrag(event) {
+      if (!drag || (event?.pointerId != null && drag.pointer !== event.pointerId)) return;
+      const current = drag;
+      drag = null;
+      window.removeEventListener('scroll', current.restore);
+      document.documentElement.classList.remove('live-selecting');
+      current.restore();
+      if (!stopped) pickText();
+      current.release();
+    }
 
     function pickText() {
       const selection = window.getSelection();
       const frame = content.querySelector('.live-pdf');
       if (!selection || selection.isCollapsed || !selection.rangeCount || !frame) return;
-      const range = selection.getRangeAt(0);
-      if (!frame.contains(range.startContainer) || !frame.contains(range.endContainer)) return;
+      const textLayer = frame.querySelector('.live-pdf-text');
+      if (!textLayer || !textLayer.contains(selection.anchorNode)) return;
+      const range = selection.getRangeAt(0).cloneRange();
+      if (!textLayer.contains(range.startContainer)) range.setStart(textLayer, 0);
+      if (!textLayer.contains(range.endContainer)) range.setEnd(textLayer, textLayer.childNodes.length);
       const area = frame.getBoundingClientRect();
       const hit = range.getBoundingClientRect();
       if (!area.width || !area.height) return;
@@ -121,10 +153,23 @@
       const rects = [...range.getClientRects()].map(rect => ({
         left: clamp((rect.left - area.left) / area.width), top: clamp((rect.top - area.top) / area.height),
         right: clamp((rect.right - area.left) / area.width), bottom: clamp((rect.bottom - area.top) / area.height),
-      })).filter(rect => rect.right > rect.left && rect.bottom > rect.top).slice(0, 16);
+      })).filter(rect => rect.right > rect.left && rect.bottom > rect.top);
+      // Keep the entire range even on slides with densely fragmented text.
+      if (rects.length > 2048) {
+        const step = Math.ceil(rects.length / 2048);
+        const compact = [];
+        for (let i = 0; i < rects.length; i += step) {
+          const group = rects.slice(i, i + step);
+          compact.push({left: Math.min(...group.map(rect => rect.left)),
+            top: Math.min(...group.map(rect => rect.top)),
+            right: Math.max(...group.map(rect => rect.right)),
+            bottom: Math.max(...group.map(rect => rect.bottom))});
+        }
+        rects.splice(0, rects.length, ...compact);
+      }
       picked = {rects, x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
         y: clamp((hit.top + hit.height / 2 - area.top) / area.height),
-        quote: selection.toString().trim().slice(0, 240)};
+        quote: range.toString().trim().slice(0, 240)};
       if (feedback) feedback.textContent = picked.quote ? '선택: “' + picked.quote + '”' : '';
       paintIndex();
     }
@@ -166,9 +211,14 @@
       feedback.textContent = displayed + '쪽에 질문을 붙여요.';
     }
 
+    const updateSelection = () => { if (!drag) pickText(); };
     if (!faculty) {
-      document.addEventListener('selectionchange', pickText);
+      document.addEventListener('selectionchange', updateSelection);
       content.addEventListener('click', pickPoint);
+      content.addEventListener('pointerdown', beginDrag);
+      window.addEventListener('pointerup', finishDrag);
+      window.addEventListener('pointercancel', finishDrag);
+      window.addEventListener('blur', finishDrag);
       confusedButton?.addEventListener('click', sendConfusion);
       askButton?.addEventListener('click', askHere);
     }
@@ -276,7 +326,7 @@
           }
           return frame;
         } finally {
-          await pdf.doc.destroy();
+          pdf.doc.destroy().catch(() => {});
         }
       });
     }
@@ -285,10 +335,32 @@
       const render = display(target).finally(() => {
         if (activeRender !== render) return;
         activeRender = null;
+        clearTimeout(initialCatchup);
+        initialCatchup = undefined;
         retryAfter = transitions.length ? 0 : performance.now() + 350;
         if (transitions.length) playTransitions();
       });
       activeRender = render;
+    }
+
+    async function showTransition(target) {
+      let timer;
+      const budget = new Promise(resolve => {
+        armCatchup = () => {
+          if (transitions.length > 1 && timer === undefined) {
+            timer = setTimeout(() => resolve('behind'), 450);
+          }
+        };
+        armCatchup();
+      });
+      try {
+        const shown = await Promise.race([display(target), budget]);
+        if (shown === 'behind') ++renderId; // Ignore a late frame, but keep its cached file.
+        return shown;
+      } finally {
+        clearTimeout(timer);
+        armCatchup = null;
+      }
     }
 
     async function playTransitions() {
@@ -297,7 +369,7 @@
       try {
         while (!stopped && transitions.length) {
           const target = transitions[0];
-          const current = display(target);
+          const current = showTransition(target);
           // Overlap one lookahead canvas and one extra download. Keep render
           // concurrency bounded on slower student devices.
           const next = transitions[1];
@@ -306,21 +378,21 @@
           if (later?.pdf) pageBytes(later, later.page).catch(() => {});
           let shown = await current;
           for (const delay of [180, 400]) {
-            if (shown || stopped) break;
+            if (shown || stopped || transitions.length > 1) break;
             await new Promise(resolve => setTimeout(resolve, delay));
-            if (!stopped) shown = await display(target);
+            if (!stopped) shown = await showTransition(target);
           }
           if (stopped) break;
-          if (!shown) {
+          if (shown === 'behind' || !shown) {
             if (transitions.length === 1) {
               retryAfter = performance.now() + 350;
               break;
             }
-            await display({page: target.page, total: target.total, text: '이 페이지를 불러오지 못했습니다.'});
+            await display({page: target.page, total: target.total, text: '이전 페이지 로딩 지연 · 최신 페이지로 이동 중'});
           }
           transitions.shift();
           if (transitions.length) {
-            await new Promise(resolve => setTimeout(resolve, transitions.length > 4 ? 34 : 70));
+            await new Promise(resolve => setTimeout(resolve, transitions.length > 2 ? 24 : 42));
           }
         }
       } finally {
@@ -356,6 +428,7 @@
         status.textContent = '교안 화면을 불러오지 못했습니다.';
         return;
       }
+      while (drag && !stopped && id === renderId) await drag.done;
       if (stopped || id !== renderId) return;
       if (faculty && !frame) return;
       if (target.image) frame ??= el('img', {src: 'data:image/jpeg;base64,' + target.image, alt: target.page + '쪽 교안'});
@@ -410,6 +483,18 @@
           follow(null);
         } else if (!faculty && slide && data.transitions?.length) {
           transitions.push(...data.transitions);
+          armCatchup?.();
+          if (activeRender && initialCatchup === undefined) {
+            const waiting = activeRender;
+            initialCatchup = setTimeout(() => {
+              initialCatchup = undefined;
+              if (stopped || activeRender !== waiting) return;
+              ++renderId;
+              activeRender = null;
+              retryAfter = 0;
+              playTransitions();
+            }, 450);
+          }
           cursor = data.transitions.at(-1).version;
           if (changed) retryAfter = 0;
           playTransitions();
@@ -449,8 +534,14 @@
     function stop() {
       stopped = true;
       clearTimeout(timer);
-      document.removeEventListener('selectionchange', pickText);
+      clearTimeout(initialCatchup);
+      document.removeEventListener('selectionchange', updateSelection);
       content.removeEventListener('click', pickPoint);
+      content.removeEventListener('pointerdown', beginDrag);
+      window.removeEventListener('pointerup', finishDrag);
+      window.removeEventListener('pointercancel', finishDrag);
+      window.removeEventListener('blur', finishDrag);
+      finishDrag();
       confusedButton?.removeEventListener('click', sendConfusion);
       askButton?.removeEventListener('click', askHere);
       window.removeEventListener('resize', resize);

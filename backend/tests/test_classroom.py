@@ -84,7 +84,8 @@ class ClassroomTests(unittest.TestCase):
             self.assertNotIn("text", self.req("GET", path + "/live?version=" + snap["version"], first).json()["slide"])
             self.req("PUT", path + "/live", self.tf, json={"page": 2})
         anchor = {"x": .31, "y": .52, "quote": "선택한 교안 문구",
-                  "rects": [{"left": .2, "top": .5, "right": .4, "bottom": .54}]}
+                  "rects": [{"left": .2, "top": .02 * i, "right": .4, "bottom": .02 * i + .01}
+                            for i in range(24)]}
         reaction = path + "/live/confusion"
         self.assertEqual(self.req("PUT", reaction, first, json={"page": 1, "anchor": anchor}).status_code, 409)
         for _ in range(2):

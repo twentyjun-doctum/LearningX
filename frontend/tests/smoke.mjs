@@ -91,7 +91,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
      if (inner) return inner;
     }
     return null;
-   }, addEventListener(){}, removeEventListener(){}};
+   }, listeners:new Map(), addEventListener(type, fn){this.listeners.set(type,fn);}, removeEventListener(type){this.listeners.delete(type);}};
   fixture.append(...children);
   return fixture;
  }
@@ -113,6 +113,8 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.doesNotMatch(css, /:fullscreen[^{}]*\.live-marks[^{}]*\{[^{}]*display:\s*none/);
  let releaseOld;
  let failedLatest = false;
+ let releaseStalled;
+ const stalled = new Promise(resolve => { releaseStalled = resolve; });
  const oldPrefetch = new Promise(resolve => { releaseOld = resolve; });
  const calls = [];
  let lastRendered = null;
@@ -136,6 +138,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   }
   calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
   if (url.pathname.endsWith('/v1') && url.searchParams.get('page') === '2') return oldPrefetch;
+  if (url.pathname.endsWith('/v6')) return stalled;
   if (url.pathname.endsWith('/v4') && !failedLatest) {
    failedLatest = true;
    throw error(503);
@@ -144,9 +147,15 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  };
  const page = {getViewport:({scale})=>({width:100*scale,height:100*scale,scale}),
   render:()=>({promise:Promise.resolve()}),streamTextContent(){}};
+ const windowListeners = new Map();
+ const htmlClasses = new Set();
+ const mockWindow = {QU:{el:node,LEVEL:{}}, scrollX:0, scrollY:120, getSelection:()=>null,
+  scrollTo(x,y){this.scrollX=x; this.scrollY=y;},
+  addEventListener(type,fn){windowListeners.set(type,fn);}, removeEventListener(type){windowListeners.delete(type);}};
  const ctx = vm.createContext({
-  window:{QU:{el:node,LEVEL:{}},addEventListener(){},removeEventListener(){}},
-  document:{addEventListener(){},removeEventListener(){}}, innerHeight:720, devicePixelRatio:1,
+  window:mockWindow,
+  document:{addEventListener(){},removeEventListener(){},documentElement:{classList:{add:x=>htmlClasses.add(x),remove:x=>htmlClasses.delete(x)}}},
+  innerHeight:720, devicePixelRatio:1,
   URLSearchParams,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
   loadFixtureRenderer: async ()=>({
    GlobalWorkerOptions:{},TextLayer:class {async render(){}},
@@ -183,8 +192,32 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   timeline.push(latest);
   await until(()=>painted.length>oldDraw && view.page()===6,'return to a previously rendered page');
   assert.ok(!calls.some(([version, number])=>version==='v5'&&number===6),'warm canvas reused across transition versions');
+  latest = slide(5,'v6');
+  timeline.push(latest);
+  await until(()=>calls.some(([version])=>version==='v6'),'intermediate page request is stalled');
+  latest = slide(8,'v7');
+  timeline.push(latest);
+  await until(()=>view.page()===8,'latest page catches up while past download is stalled');
+  assert.deepEqual(painted.slice(-2),['5 / 9','8 / 9']);
+  releaseStalled(response);
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(lastRendered,'8 / 9','late old frame does not roll back the visible page');
+  const drag = {pointerId:1,pointerType:'mouse',button:0,target:{closest:()=>true}};
+  content.listeners.get('pointerdown')(drag);
+  assert.ok(htmlClasses.has('live-selecting'));
+  mockWindow.scrollY=180;
+  windowListeners.get('scroll')();
+  assert.equal(mockWindow.scrollY,120);
+  latest = slide(9,'v8');
+  timeline.push(latest);
+  await until(()=>calls.some(([version])=>version==='v8'),'new page is fetched during text selection');
+  assert.equal(view.page(),8,'selection keeps the current slide in place');
+  windowListeners.get('pointerup')(drag);
+  await until(()=>view.page()===9,'latest page resumes after selection');
+  assert.ok(!htmlClasses.has('live-selecting'));
  } finally {
   releaseOld(response);
+  releaseStalled(response);
   view.stop();
  }
  console.log('OK: live slide follows rapid page changes and retries temporary failures');
