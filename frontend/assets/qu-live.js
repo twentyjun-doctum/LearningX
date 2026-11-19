@@ -274,9 +274,15 @@
           highlight.style.height = ((rect.bottom - rect.top) * 100) + '%';
           layer.append(highlight);
         }
-        const marker = el('span', {class: 'live-mark ' + pin.level, text: pin.count ?? ''});
-        marker.style.left = (pin.x * 100) + '%';
-        marker.style.top = (pin.y * 100) + '%';
+        const corner = pin.level === 'confused' && pin.rects?.length;
+        const marker = el('span', {class: 'live-mark ' + pin.level + (corner ? ' at-selection-corner' : ''), text: pin.count ?? ''});
+        if (corner) {
+          marker.style.left = (Math.max(...pin.rects.map(rect => rect.right)) * 100) + '%';
+          marker.style.top = (Math.min(...pin.rects.map(rect => rect.top)) * 100) + '%';
+        } else {
+          marker.style.left = (pin.x * 100) + '%';
+          marker.style.top = (pin.y * 100) + '%';
+        }
         layer.append(marker);
       }
       frame.append(layer);
