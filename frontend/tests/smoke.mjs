@@ -113,6 +113,8 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.doesNotMatch(css, /:fullscreen[^{}]*\.live-marks[^{}]*\{[^{}]*display:\s*none/);
  let releaseOld;
  let failedLatest = false;
+ let releaseStalled;
+ const stalled = new Promise(resolve => { releaseStalled = resolve; });
  const oldPrefetch = new Promise(resolve => { releaseOld = resolve; });
  const calls = [];
  let lastRendered = null;
@@ -136,6 +138,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   }
   calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
   if (url.pathname.endsWith('/v1') && url.searchParams.get('page') === '2') return oldPrefetch;
+  if (url.pathname.endsWith('/v6')) return stalled;
   if (url.pathname.endsWith('/v4') && !failedLatest) {
    failedLatest = true;
    throw error(503);
@@ -183,8 +186,19 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   timeline.push(latest);
   await until(()=>painted.length>oldDraw && view.page()===6,'return to a previously rendered page');
   assert.ok(!calls.some(([version, number])=>version==='v5'&&number===6),'warm canvas reused across transition versions');
+  latest = slide(5,'v6');
+  timeline.push(latest);
+  await until(()=>calls.some(([version])=>version==='v6'),'intermediate page request is stalled');
+  latest = slide(8,'v7');
+  timeline.push(latest);
+  await until(()=>view.page()===8,'latest page catches up while past download is stalled');
+  assert.deepEqual(painted.slice(-2),['5 / 9','8 / 9']);
+  releaseStalled(response);
+  await new Promise(resolve=>setTimeout(resolve,25));
+  assert.equal(lastRendered,'8 / 9','late old frame does not roll back the visible page');
  } finally {
   releaseOld(response);
+  releaseStalled(response);
   view.stop();
  }
  console.log('OK: live slide follows rapid page changes and retries temporary failures');

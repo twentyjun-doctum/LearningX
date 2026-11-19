@@ -77,6 +77,8 @@
     let cursor = slide?.version;
     let playing = false;
     const transitions = [];
+    let armCatchup;
+    let initialCatchup;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -276,7 +278,7 @@
           }
           return frame;
         } finally {
-          await pdf.doc.destroy();
+          pdf.doc.destroy().catch(() => {});
         }
       });
     }
@@ -285,10 +287,32 @@
       const render = display(target).finally(() => {
         if (activeRender !== render) return;
         activeRender = null;
+        clearTimeout(initialCatchup);
+        initialCatchup = undefined;
         retryAfter = transitions.length ? 0 : performance.now() + 350;
         if (transitions.length) playTransitions();
       });
       activeRender = render;
+    }
+
+    async function showTransition(target) {
+      let timer;
+      const budget = new Promise(resolve => {
+        armCatchup = () => {
+          if (transitions.length > 1 && timer === undefined) {
+            timer = setTimeout(() => resolve('behind'), 450);
+          }
+        };
+        armCatchup();
+      });
+      try {
+        const shown = await Promise.race([display(target), budget]);
+        if (shown === 'behind') ++renderId; // Ignore a late frame, but keep its cached file.
+        return shown;
+      } finally {
+        clearTimeout(timer);
+        armCatchup = null;
+      }
     }
 
     async function playTransitions() {
@@ -297,7 +321,7 @@
       try {
         while (!stopped && transitions.length) {
           const target = transitions[0];
-          const current = display(target);
+          const current = showTransition(target);
           // Overlap one lookahead canvas and one extra download. Keep render
           // concurrency bounded on slower student devices.
           const next = transitions[1];
@@ -306,21 +330,21 @@
           if (later?.pdf) pageBytes(later, later.page).catch(() => {});
           let shown = await current;
           for (const delay of [180, 400]) {
-            if (shown || stopped) break;
+            if (shown || stopped || transitions.length > 1) break;
             await new Promise(resolve => setTimeout(resolve, delay));
-            if (!stopped) shown = await display(target);
+            if (!stopped) shown = await showTransition(target);
           }
           if (stopped) break;
-          if (!shown) {
+          if (shown === 'behind' || !shown) {
             if (transitions.length === 1) {
               retryAfter = performance.now() + 350;
               break;
             }
-            await display({page: target.page, total: target.total, text: '이 페이지를 불러오지 못했습니다.'});
+            await display({page: target.page, total: target.total, text: '이전 페이지 로딩 지연 · 최신 페이지로 이동 중'});
           }
           transitions.shift();
           if (transitions.length) {
-            await new Promise(resolve => setTimeout(resolve, transitions.length > 4 ? 34 : 70));
+            await new Promise(resolve => setTimeout(resolve, transitions.length > 2 ? 24 : 42));
           }
         }
       } finally {
@@ -410,6 +434,18 @@
           follow(null);
         } else if (!faculty && slide && data.transitions?.length) {
           transitions.push(...data.transitions);
+          armCatchup?.();
+          if (activeRender && initialCatchup === undefined) {
+            const waiting = activeRender;
+            initialCatchup = setTimeout(() => {
+              initialCatchup = undefined;
+              if (stopped || activeRender !== waiting) return;
+              ++renderId;
+              activeRender = null;
+              retryAfter = 0;
+              playTransitions();
+            }, 450);
+          }
           cursor = data.transitions.at(-1).version;
           if (changed) retryAfter = 0;
           playTransitions();
@@ -449,6 +485,7 @@
     function stop() {
       stopped = true;
       clearTimeout(timer);
+      clearTimeout(initialCatchup);
       document.removeEventListener('selectionchange', pickText);
       content.removeEventListener('click', pickPoint);
       confusedButton?.removeEventListener('click', sendConfusion);
