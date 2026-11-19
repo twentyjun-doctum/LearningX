@@ -675,6 +675,7 @@ def flag_confusion(session_id: str, data: ConfusionRequest, db: Session = Depend
     if current.status != "OPEN":
         raise HTTPException(423, "The class is not taking feedback right now")
     slide = db.get(LiveSlide, session_id)
+    # Accept a reaction when the presenter advances before the student submits it.
     if not slide or (slide.page != data.page and not db.query(LiveTransition).filter_by(
         session_id=session_id, page=data.page,
     ).first()):
