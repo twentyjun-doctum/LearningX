@@ -178,6 +178,11 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   confusion = {spots:[{x:.3, y:.3, count:2, rects:[selection]}]};
   await until(()=>content.querySelector('.live-mark')?.textContent===2,'same-page live count updates');
   assert.equal(content.children[0],sameFrame,'reactions update the overlay without replacing the slide');
+  const oldDraw = painted.length;
+  latest = slide(6,'v5');
+  timeline.push(latest);
+  await until(()=>painted.length>oldDraw && view.page()===6,'return to a previously rendered page');
+  assert.ok(!calls.some(([version, number])=>version==='v5'&&number===6),'warm canvas reused across transition versions');
  } finally {
   releaseOld(response);
   view.stop();

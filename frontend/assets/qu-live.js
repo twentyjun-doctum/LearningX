@@ -259,13 +259,22 @@
     }
 
     function pageFrame(target, number, w, h, onBytes) {
-      return cached('page:' + target.version + ':' + number + ':' + w + ':' + h, async () => {
+      const rendered = 'rendered:' + number + ':' + w + ':' + h;
+      const ready = frames.get(rendered);
+      if (ready) return cached(rendered, () => ready);
+      const inFlight = 'page:' + target.version + ':' + number + ':' + w + ':' + h;
+      return cached(inFlight, async () => {
         const bytes = await pageBytes(target, number);
         onBytes?.();
         // PDF.js transfers the input to its worker. Keep the cached bytes intact.
         const pdf = await loadPdf(bytes.slice(0));
         try {
-          return await renderPage(pdf, 1, w, h);
+          const frame = await renderPage(pdf, 1, w, h);
+          if (!stopped) {
+            frames.delete(inFlight);
+            cached(rendered, () => Promise.resolve(frame));
+          }
+          return frame;
         } finally {
           await pdf.doc.destroy();
         }
@@ -288,11 +297,14 @@
       try {
         while (!stopped && transitions.length) {
           const target = transitions[0];
-          // Download up to two upcoming pages while the current frame renders.
-          for (const next of transitions.slice(1, 3)) {
-            if (next.pdf) pageBytes(next, next.page).catch(() => {});
-          }
-          let shown = await display(target);
+          const current = display(target);
+          // Overlap one lookahead canvas and one extra download. Keep render
+          // concurrency bounded on slower student devices.
+          const next = transitions[1];
+          if (next?.pdf) pageFrame(next, next.page, width(), height()).catch(() => {});
+          const later = transitions[2];
+          if (later?.pdf) pageBytes(later, later.page).catch(() => {});
+          let shown = await current;
           for (const delay of [180, 400]) {
             if (shown || stopped) break;
             await new Promise(resolve => setTimeout(resolve, delay));
@@ -329,7 +341,7 @@
       const h = height();
       let frame;
       const preloadNext = () => {
-        if (!faculty && !stopped && id === renderId && target.after) {
+        if (!faculty && !stopped && id === renderId && target.version === slide?.version && target.after) {
           pageBytes(target, target.after).catch(() => {});
         }
       };
@@ -364,7 +376,7 @@
             cached('deck:' + number + ':' + w + ':' + h, () => renderPage(deck, number, w, h)).catch(() => {});
           }
         }
-      } else if (!faculty && target.pdf) {
+      } else if (!faculty && target.pdf && target.version === slide?.version) {
         for (const number of [target.after, target.before]) {
           if (number) pageFrame(target, number, w, h).catch(() => {});
         }
