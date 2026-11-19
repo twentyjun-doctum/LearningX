@@ -184,7 +184,7 @@
         y: clamp((hit.top + hit.height / 2 - area.top) / area.height),
         quote: range.toString().trim().slice(0, 240)};
       if (feedback) feedback.textContent = picked.quote ? '선택: “' + picked.quote + '”' : '';
-      showSelectionActions(hit);
+      if (!drag) showSelectionActions(hit);
       paintIndex();
     }
 
@@ -225,7 +225,7 @@
       feedback.textContent = displayed + '쪽에 질문을 붙여요.';
     }
 
-    const updateSelection = () => { if (!drag) pickText(); };
+    const updateSelection = () => pickText();
     if (!faculty) {
       document.addEventListener('selectionchange', updateSelection);
       panel.addEventListener('pointerdown', hideSelectionActions);
@@ -280,20 +280,30 @@
       const pins = [...(current?.spots ?? []).map(spot => ({...spot, level: 'confused'})),
         ...visible.map((item, number) => item.anchor ? {...item.anchor, level: item.level, count: number + 1} : null).filter(Boolean)];
       if (picked) pins.push({...picked, level: 'picked'});
+      const highlights = new Map();
       for (const pin of pins) {
         for (const rect of pin.rects ?? []) {
+          if (!highlights.has(pin.level)) {
+            const group = el('div', {class: 'live-highlight-group ' + pin.level});
+            highlights.set(pin.level, group);
+            layer.append(group);
+          }
           const highlight = el('span', {class: 'live-highlight ' + pin.level});
           highlight.style.left = (rect.left * 100) + '%';
           highlight.style.top = (rect.top * 100) + '%';
           highlight.style.width = ((rect.right - rect.left) * 100) + '%';
           highlight.style.height = ((rect.bottom - rect.top) * 100) + '%';
-          layer.append(highlight);
+          highlights.get(pin.level).append(highlight);
         }
         const corner = pin.level === 'confused' && pin.rects?.length;
         const marker = el('span', {class: 'live-mark ' + pin.level + (corner ? ' at-selection-corner' : ''), text: pin.count ?? ''});
         if (corner) {
-          marker.style.left = (Math.max(...pin.rects.map(rect => rect.right)) * 100) + '%';
-          marker.style.top = (Math.min(...pin.rects.map(rect => rect.top)) * 100) + '%';
+          const first = pin.rects.reduce((top, rect) => rect.top < top.top ? rect : top);
+          const lineMiddle = (first.top + first.bottom) / 2;
+          const right = pin.rects.reduce((edge, rect) =>
+            rect.top <= lineMiddle && rect.bottom >= lineMiddle ? Math.max(edge, rect.right) : edge, first.right);
+          marker.style.left = (right * 100) + '%';
+          marker.style.top = (first.top * 100) + '%';
         } else {
           marker.style.left = (pin.x * 100) + '%';
           marker.style.top = (pin.y * 100) + '%';
