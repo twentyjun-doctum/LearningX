@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from test_api import app
-from learningx.ingest_queue import _claim, MAX_ATTEMPTS, process_next_job
+from learningx.ingest_queue import _claim, _owned_job, _renew_lease, MAX_ATTEMPTS, WORKER_LEASE_SECONDS, process_next_job
 from learningx.storage import SessionLocal, User, Course, IngestJob, init_db
 from test_engine_regressions import ROOT
 from content_roles import classify_page
@@ -68,5 +68,24 @@ class LeaseRecoveryTests(unittest.TestCase):
     def test_expired_retryable_attempt_is_reclaimed(self):
         job_id = self.job(MAX_ATTEMPTS - 1)
         with SessionLocal() as db:
-            self.assertEqual(_claim(db, job_id), job_id)
+            self.assertEqual(_claim(db, job_id), (job_id, MAX_ATTEMPTS))
             self.assertEqual(db.get(IngestJob, job_id).attempts, MAX_ATTEMPTS)
+
+
+    def test_worker_heartbeat_renews_only_current_unexpired_attempt(self):
+        job_id = self.job(1)
+        with SessionLocal() as db:
+            self.assertEqual(_claim(db, job_id, lease_seconds=WORKER_LEASE_SECONDS), (job_id, 2))
+        self.assertFalse(_renew_lease(job_id, 1))
+        self.assertTrue(_renew_lease(job_id, 2))
+        with SessionLocal() as db:
+            row = db.get(IngestJob, job_id)
+            expiry = row.lease_until.replace(tzinfo=timezone.utc)
+            self.assertLessEqual((expiry - datetime.now(timezone.utc)).total_seconds(), WORKER_LEASE_SECONDS)
+            self.assertIsNone(_claim(db, job_id))
+            row.lease_until = datetime.now(timezone.utc) - timedelta(seconds=1)
+            db.commit()
+            self.assertFalse(_renew_lease(job_id, 2))
+            self.assertEqual(_claim(db, job_id, lease_seconds=WORKER_LEASE_SECONDS), (job_id, 3))
+            self.assertIsNone(_owned_job(db, job_id, 2))
+            self.assertIsNotNone(_owned_job(db, job_id, 3))
