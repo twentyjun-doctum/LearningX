@@ -74,6 +74,9 @@
     let renderId = 0;
     let activeRender = null;
     let retryAfter = 0;
+    let cursor = slide?.version;
+    let playing = false;
+    const transitions = [];
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -256,13 +259,22 @@
     }
 
     function pageFrame(target, number, w, h, onBytes) {
-      return cached('page:' + target.version + ':' + number + ':' + w + ':' + h, async () => {
+      const rendered = 'rendered:' + number + ':' + w + ':' + h;
+      const ready = frames.get(rendered);
+      if (ready) return cached(rendered, () => ready);
+      const inFlight = 'page:' + target.version + ':' + number + ':' + w + ':' + h;
+      return cached(inFlight, async () => {
         const bytes = await pageBytes(target, number);
         onBytes?.();
         // PDF.js transfers the input to its worker. Keep the cached bytes intact.
         const pdf = await loadPdf(bytes.slice(0));
         try {
-          return await renderPage(pdf, 1, w, h);
+          const frame = await renderPage(pdf, 1, w, h);
+          if (!stopped) {
+            frames.delete(inFlight);
+            cached(rendered, () => Promise.resolve(frame));
+          }
+          return frame;
         } finally {
           await pdf.doc.destroy();
         }
@@ -273,9 +285,47 @@
       const render = display(target).finally(() => {
         if (activeRender !== render) return;
         activeRender = null;
-        retryAfter = performance.now() + 350;
+        retryAfter = transitions.length ? 0 : performance.now() + 350;
+        if (transitions.length) playTransitions();
       });
       activeRender = render;
+    }
+
+    async function playTransitions() {
+      if (playing || activeRender || stopped || performance.now() < retryAfter) return;
+      playing = true;
+      try {
+        while (!stopped && transitions.length) {
+          const target = transitions[0];
+          const current = display(target);
+          // Overlap one lookahead canvas and one extra download. Keep render
+          // concurrency bounded on slower student devices.
+          const next = transitions[1];
+          if (next?.pdf) pageFrame(next, next.page, width(), height()).catch(() => {});
+          const later = transitions[2];
+          if (later?.pdf) pageBytes(later, later.page).catch(() => {});
+          let shown = await current;
+          for (const delay of [180, 400]) {
+            if (shown || stopped) break;
+            await new Promise(resolve => setTimeout(resolve, delay));
+            if (!stopped) shown = await display(target);
+          }
+          if (stopped) break;
+          if (!shown) {
+            if (transitions.length === 1) {
+              retryAfter = performance.now() + 350;
+              break;
+            }
+            await display({page: target.page, total: target.total, text: '이 페이지를 불러오지 못했습니다.'});
+          }
+          transitions.shift();
+          if (transitions.length) {
+            await new Promise(resolve => setTimeout(resolve, transitions.length > 4 ? 34 : 70));
+          }
+        }
+      } finally {
+        playing = false;
+      }
     }
 
     async function display(target) {
@@ -291,7 +341,7 @@
       const h = height();
       let frame;
       const preloadNext = () => {
-        if (!faculty && !stopped && id === renderId && target.after) {
+        if (!faculty && !stopped && id === renderId && target.version === slide?.version && target.after) {
           pageBytes(target, target.after).catch(() => {});
         }
       };
@@ -326,11 +376,12 @@
             cached('deck:' + number + ':' + w + ':' + h, () => renderPage(deck, number, w, h)).catch(() => {});
           }
         }
-      } else if (!faculty && target.pdf) {
+      } else if (!faculty && target.pdf && target.version === slide?.version) {
         for (const number of [target.after, target.before]) {
           if (number) pageFrame(target, number, w, h).catch(() => {});
         }
       }
+      return true;
     }
 
     async function tick() {
@@ -339,6 +390,7 @@
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
+        if (!faculty && cursor) params.set('cursor', cursor);
         const data = await api(path + '?' + params, {timeout: 10000});
         if (stopped) return;
         stamp = data.revision;
@@ -353,11 +405,20 @@
         if (data.index) items = data.index;
         open = data.status === 'OPEN';
         confusion = data.confusion;
-        if (changed && (selected === null || data.status === 'CLOSED')) {
+        if (!faculty && data.status === 'CLOSED') {
+          transitions.length = 0;
+          follow(null);
+        } else if (!faculty && slide && data.transitions?.length) {
+          transitions.push(...data.transitions);
+          cursor = data.transitions.at(-1).version;
+          if (changed) retryAfter = 0;
+          playTransitions();
+        } else if (!faculty && (playing || transitions.length)) {
+          playTransitions();
+        } else if (changed && (selected === null || data.status === 'CLOSED')) {
+          if (!faculty) cursor = slide?.version;
           follow(slide);
         } else if (!faculty && slide && displayed !== slide.page && !activeRender && performance.now() >= retryAfter) {
-          // A temporary file/network error can occur while the page version
-          // stays unchanged. Reuse its full metadata and retry on live refresh.
           follow(slide);
         }
         if (selected === slide?.page) selected = null;

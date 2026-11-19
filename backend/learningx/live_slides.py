@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 
 from fastapi import HTTPException
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .private_store import has_material_artifact, read_material_artifact
@@ -23,6 +23,17 @@ class LiveSlide(Base):
     total: Mapped[int] = mapped_column(Integer)
     version: Mapped[str] = mapped_column(String(64))
     content: Mapped[str] = mapped_column(Text, deferred=True)
+
+
+class LiveTransition(Base):
+    __tablename__ = "live_transitions"
+    session_id: Mapped[str] = mapped_column(ForeignKey("class_sessions.id"), primary_key=True)
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    version: Mapped[str] = mapped_column(String(64))
+    __table_args__ = (UniqueConstraint("session_id", "version"),)
+    page: Mapped[int] = mapped_column(Integer)
+    total: Mapped[int] = mapped_column(Integer)
+    content: Mapped[str] = mapped_column(Text)
 
 
 class QuestionSlide(Base):

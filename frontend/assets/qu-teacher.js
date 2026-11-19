@@ -422,22 +422,26 @@
     const live = state.live;
     const view = liveView;
     if (!live || !view || !Number.isInteger(page) || page < 1 || page > (view.total() ?? Infinity)) return;
-    live.requestedPage = page;
+    (live.requestedPages ??= []).push(page);
     live.lastRequestedPage = page;
     view.select(page);
     if (live.sendingPage) return;
     live.sendingPage = true;
     try {
-      while (live.requestedPage !== undefined && state.live === live && liveView === view) {
-        const next = live.requestedPage;
-        live.requestedPage = undefined;
+      while (live.requestedPages.length && state.live === live && liveView === view) {
+        const pages = live.requestedPages.splice(0, 16);
+        const options = {method: 'PUT', body: {pages, batch_id: crypto.randomUUID()}, timeout: 8000};
         try {
-          const result = await api(`/v1/sessions/${live.session.id}/live`, {method: 'PUT', body: {page: next}});
+          const url = `/v1/sessions/${live.session.id}/live`;
+          const result = await api(url, options).catch(err => {
+            if ((err.status === 0 || err.status >= 500) && state.live === live && liveView === view) return api(url, options);
+            throw err;
+          });
           view.acknowledge(result);
           setError($('global-error'), null);
         } catch (err) {
           if (state.live !== live || liveView !== view) return;
-          if (live.requestedPage === undefined) {
+          if (!live.requestedPages.length) {
             live.lastRequestedPage = undefined;
             view.reconcile();
           }

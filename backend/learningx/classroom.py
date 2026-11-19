@@ -16,6 +16,7 @@ import json
 import os
 import secrets
 import time
+from typing import Annotated
 from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Literal
@@ -29,7 +30,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
+from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
 from .security import actor, issue_token, require_course, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
 
@@ -124,7 +125,15 @@ class JoinRequest(BaseModel):
 
 
 class ShareSlide(BaseModel):
-    page: int = Field(ge=1)
+    page: int | None = Field(default=None, ge=1)
+    pages: list[Annotated[int, Field(ge=1)]] | None = Field(default=None, min_length=1, max_length=16)
+    batch_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
+
+    @model_validator(mode="after")
+    def check_source(self):
+        if (self.page is None) == (self.pages is None):
+            raise ValueError("Provide either a page or pages")
+        return self
 
 
 class SlideRectangle(BaseModel):
@@ -354,15 +363,15 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
 
 @router.get("/sessions/{session_id}/live")
 async def live_snapshot(session_id: str, response: Response, version: str = "",
-                        after: str | None = None, index_version: str = "",
+                        after: str | None = None, index_version: str = "", cursor: str | None = None,
                         db: Session = Depends(session), user: User = Depends(actor)):
-    if after is not None and after == revision(session_id):
+    if after is not None and after == revision(session_id) and (cursor is None or cursor == version):
         await run_in_threadpool(_live_access, db, session_id, user)
         await run_in_threadpool(db.rollback)
         await wait_for_update(session_id, after)
     stamp = revision(session_id)
     response.headers["Cache-Control"] = "no-store"
-    snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version)
+    snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version, cursor)
     index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
     if index_version == index_stamp:
         del snapshot["index"]
@@ -387,7 +396,7 @@ def _slide_metadata(slide, version=""):
     return metadata
 
 
-def _snapshot(db, session_id, user, version):
+def _snapshot(db, session_id, user, version, cursor=None):
     current, faculty = _live_access(db, session_id, user)
     if current.status == "CLOSED":
         return {"status": current.status, "slide": None, "index": []}
@@ -422,7 +431,17 @@ def _snapshot(db, session_id, user, version):
     snapshot = _slide_metadata(slide, version)
     if faculty and snapshot and snapshot.get("pdf"):
         snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
-    return {"status": current.status, "slide": snapshot, "index": index, "confusion": confusion}
+    transitions = []
+    if cursor and slide and cursor != slide.version:
+        history = db.query(LiveTransition).filter_by(session_id=session_id)
+        prior = history.filter_by(version=cursor).first()
+        latest = history.filter_by(version=slide.version).first()
+        if prior and latest:
+            transitions = [_slide_metadata(item) for item in history.filter(
+                LiveTransition.position > prior.position,
+                LiveTransition.position <= latest.position,
+            ).order_by(LiveTransition.position).limit(32)]
+    return {"status": current.status, "slide": snapshot, "index": index, "confusion": confusion, "transitions": transitions}
 
 
 @router.get("/sessions/{session_id}/live/document")
@@ -456,14 +475,20 @@ def live_document(session_id: str, db: Session = Depends(session), user: User = 
 def live_page(session_id: str, version: str, page: int | None = None, db: Session = Depends(session), user: User = Depends(actor)):
     current, _ = _live_access(db, session_id, user)
     slide = db.get(LiveSlide, session_id)
-    if current.status == "CLOSED" or not slide or slide.version != version:
+    if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
+    historical = slide.version != version
+    if historical:
+        slide = db.query(LiveTransition).filter_by(session_id=session_id, version=version).first()
+        if not slide:
+            raise HTTPException(409, "This page is no longer being shared")
     content = json.loads(slide.content)
     if not content.get("pdf"):
         raise HTTPException(404, "No PDF for this page")
     material = db.get(Material, current.material_id)
     target = slide.page if page is None else page
-    if target not in (slide.page, content.get("before"), content.get("after")):
+    allowed = (slide.page,) if historical else (slide.page, content.get("before"), content.get("after"))
+    if target not in allowed:
         raise HTTPException(403, "This page is outside the active slide window")
     return _pdf_response(page_pdf(material, target))
 
@@ -480,16 +505,35 @@ def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     material = db.get(Material, current.material_id)
-    total, content = build_snapshot(material, data.page)
+    snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
     # Serialize presenters sharing the same classroom.
     db.refresh(current, with_for_update=True)
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
-    db.merge(LiveSlide(session_id=session_id, page=data.page, total=total, version=uid(),
-                       content=json.dumps(content, ensure_ascii=False)))
+    history = db.query(LiveTransition).filter_by(session_id=session_id)
+    batch_id = data.batch_id or uid()
+    previous = history.filter(LiveTransition.version.startswith(batch_id + ":")).order_by(LiveTransition.position).all()
+    if previous:
+        if [item.page for item in previous] != [page for page, _, _ in snapshots]:
+            raise HTTPException(409, "Batch identifier already used")
+        last = previous[-1]
+        return {"page": last.page, "total": last.total, **json.loads(last.content)}
+    position = history.with_entities(func.max(LiveTransition.position)).scalar() or 0
+    if position == 0:
+        initial = db.get(LiveSlide, session_id)
+        if initial:
+            position = 1
+            db.add(LiveTransition(session_id=session_id, position=position, version=initial.version,
+                                  page=initial.page, total=initial.total, content=initial.content))
+    for offset, (page, total, content) in enumerate(snapshots):
+        version = f"{batch_id}:{offset}"
+        encoded = json.dumps(content, ensure_ascii=False)
+        db.add(LiveTransition(session_id=session_id, position=position + offset + 1,
+                              page=page, total=total, version=version, content=encoded))
+    db.merge(LiveSlide(session_id=session_id, page=page, total=total, version=version, content=encoded))
     db.commit()
     notify(session_id)
-    return {"page": data.page, "total": total, **content}
+    return {"page": page, "total": total, **content}
 
 
 @router.get("/sessions/{session_id}/board")
