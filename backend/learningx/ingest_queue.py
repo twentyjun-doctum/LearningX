@@ -9,9 +9,12 @@ import hmac
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import tempfile
+from threading import Event, Thread
+from time import monotonic
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, Depends, Header, HTTPException
@@ -30,6 +33,8 @@ MAX_UPLOAD_BYTES=100 * 1024 * 1024  # 32.9 MB PPTX supported; can lift only afte
 UPLOAD_TTL_SECONDS=900
 JOB_LEASE_SECONDS=3600  # Dedicated GitHub Actions process, with stale-lease recovery
 MAX_ATTEMPTS=3
+WORKER_LEASE_SECONDS=90
+HEARTBEAT_SECONDS=20
 MIME={".pdf":"application/pdf",
       ".pptx":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}
 
@@ -192,7 +197,7 @@ async def retry_upload(course_id:str,upload_id:str,db:Session=Depends(session),u
     return _public_job(row)
 
 
-def _claim(db,job_id=None):
+def _claim(db, job_id=None, *, lease_seconds=JOB_LEASE_SECONDS):
     now=datetime.now(timezone.utc)
     # Polling without a job ID must also close exhausted, expired leases.
     expired = db.query(IngestJob).filter(
@@ -202,11 +207,11 @@ def _claim(db,job_id=None):
     )
     if job_id is not None:
         expired = expired.filter(IngestJob.id == job_id)
-    expired.update({
-        IngestJob.status: "FAILED",
-        IngestJob.error_code: "WORKER_TIMEOUT",
-        IngestJob.lease_until: None,
-    }, synchronize_session=False)
+    for job in expired.with_for_update(skip_locked=True):
+        job.status = "FAILED"
+        job.error_code = "WORKER_TIMEOUT"
+        job.lease_until = None
+        _log_ingest(job.id, job.attempts, "claim", "exhausted")
     db.commit()
     query=db.query(IngestJob)
     if job_id is not None:
@@ -218,11 +223,18 @@ def _claim(db,job_id=None):
          .order_by(IngestJob.created_at)
          .with_for_update(skip_locked=True).first())
     if not row:return None
-    row.status="RUNNING"
-    row.attempts+=1
-    row.lease_until=now+timedelta(seconds=JOB_LEASE_SECONDS)
+    queued_at = row.updated_at
+    if queued_at.tzinfo is None:
+        queued_at = queued_at.replace(tzinfo=timezone.utc)
+    wait_ms = max(0, round((now - queued_at).total_seconds() * 1000))
+    recovered = row.status == "RUNNING"
+    row.status = "RUNNING"
+    row.attempts += 1
+    row.lease_until = now + timedelta(seconds=lease_seconds)
     db.commit()
-    return row.id
+    _log_ingest(row.id, row.attempts, "claim", "recovered" if recovered else "start", wait_ms)
+
+    return row.id, row.attempts
 
 
 def _download_verified(store,job,path):
@@ -250,49 +262,109 @@ def _download_verified(store,job,path):
     return hasher.hexdigest()
 
 
-def process_next_job(job_id=None, *, prepare_live_preview=False):
+def _log_ingest(job_id, attempt, stage, event, elapsed_ms=None):
+    data = {"job_id": job_id, "attempt": attempt, "stage": stage, "event": event}
+    if elapsed_ms is not None:
+        data["elapsed_ms"] = elapsed_ms
+    print("learningx_ingest " + json.dumps(data, separators=(",", ":")), flush=True)
+
+
+def _owned_job(db, job_id, attempt):
+    return (db.query(IngestJob).filter_by(id=job_id, attempts=attempt, status="RUNNING")
+            .filter(IngestJob.lease_until > datetime.now(timezone.utc))
+            .with_for_update().populate_existing().first())
+
+
+def _renew_lease(job_id, attempt):
+    now = datetime.now(timezone.utc)
+    with SessionLocal() as db:
+        count = db.query(IngestJob).filter_by(id=job_id, attempts=attempt, status="RUNNING").filter(
+            IngestJob.lease_until > now
+        ).update({"lease_until": now + timedelta(seconds=WORKER_LEASE_SECONDS)}, synchronize_session=False)
+        db.commit()
+        return count == 1
+
+
+@contextmanager
+def _heartbeat(job_id, attempt, enabled):
+    if not enabled:
+        yield
+        return
+    stop = Event()
+
+    def renew():
+        while not stop.wait(HEARTBEAT_SECONDS):
+            try:
+                if not _renew_lease(job_id, attempt):
+                    return
+            except Exception as exc:
+                logger.warning("learningx_ingest_heartbeat_failed job=%s attempt=%s exception=%s",
+                               job_id, attempt, type(exc).__name__)
+
+    thread = Thread(target=renew, name="ingest-heartbeat", daemon=True)
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1)
+
+
+def process_next_job(job_id=None, *, prepare_live_preview=False, renew_lease=False):
     """Perform one leased job by ID; repeated queue messages are idempotent."""
     with SessionLocal() as db:
-        claimed=_claim(db,job_id)
+        claimed=_claim(db, job_id, lease_seconds=WORKER_LEASE_SECONDS if renew_lease else JOB_LEASE_SECONDS)
         if not claimed:
             row=db.get(IngestJob,job_id) if job_id else None
             if row and row.status=="READY":return {"result":"ALREADY_READY","job_id":job_id}
             if row and row.status=="FAILED":return {"result":"ALREADY_FAILED","job_id":job_id}
             if row and row.status=="RUNNING":
-                lease=row.lease_until
-                if lease and lease.tzinfo is None:
-                    lease=lease.replace(tzinfo=timezone.utc)
-                if (row.attempts>=MAX_ATTEMPTS and lease
-                        and lease<datetime.now(timezone.utc)):
-                    row.status="FAILED";row.error_code="WORKER_TIMEOUT"
-                    row.lease_until=None;db.commit()
-                    return {"result":"ALREADY_FAILED","job_id":job_id}
                 return {"result":"INFLIGHT","job_id":job_id}
             return {"result":"EMPTY" if not row else "ERROR","job_id":job_id}
+        claimed, attempt = claimed
+    with _heartbeat(claimed, attempt, renew_lease):
+        return _run_claimed_job(claimed, attempt, prepare_live_preview)
+
+
+def _run_claimed_job(claimed, attempt, prepare_live_preview):
     with SessionLocal() as db:
-        row=db.get(IngestJob,claimed)
-        if not row:return {"result":"MISSING"}
+        row = db.get(IngestJob, claimed)
+        if not row or row.attempts != attempt or row.status != "RUNNING":
+            return {"result": "LEASE_LOST", "job_id": claimed}
+        # Keep the row detached during long work so the heartbeat owns its
+        # own short DB transactions and the worker holds no idle connection.
+        db.expunge(row)
+        db.rollback()
         stage = "storage_init"
+        started = monotonic()
+        _log_ingest(claimed, attempt, stage, "start")
+
+        def advance(next_stage):
+            nonlocal stage, started
+            _log_ingest(claimed, attempt, stage, "done", round((monotonic() - started) * 1000))
+            stage, started = next_stage, monotonic()
+            _log_ingest(claimed, attempt, stage, "start")
+
         try:
             store=private_store.require_store()
             with tempfile.TemporaryDirectory(prefix="learningx-worker-") as td:
                 root=Path(td)
                 ext=Path(row.filename).suffix.lower()
                 original=root/("source"+ext)
-                stage = "download"
+                advance("download")
                 digest=_download_verified(store,row,original)
                 parsed=root/"parsed"
-                stage = "parse"
+                advance("parse")
                 document=nit.ingest(original,parsed)
                 if document["source"]["sha256"]!=digest:
                     raise ValueError("Parser source digest mismatch")
-                stage = "optional_analysis"
+                advance("optional_analysis")
                 from .deep_analysis import enrich
                 document = enrich(original, parsed, nit.root())
                 preview_ready = None
                 if ext == ".pptx" and prepare_live_preview:
                     from .pptx_preview import generate_preview
-                    stage = "live_preview"
+                    advance("live_preview")
                     preview_ready = generate_preview(original, parsed, len(document["pages"]))
                     if preview_ready:
                         artifacts = [path for path in root.rglob("*") if path.is_file()]
@@ -302,9 +374,14 @@ def process_next_job(job_id=None, *, prepare_live_preview=False):
                             preview_ready = False
                     if not preview_ready:
                         logger.warning("learningx_live_preview_unavailable")
-                stage = "publish"
+                advance("publish")
+                # The row lock fences storage publication as all attempts
+                # write the same immutable-material prefix.
+                row = _owned_job(db, claimed, attempt)
+                if not row:
+                    return {"result": "LEASE_LOST", "job_id": claimed}
                 location=store.publish_new(root,row.course_id,row.id)
-                stage = "database_commit"
+                advance("database_commit")
                 coverage=dict(document.get("media_coverage",{}))
                 coverage["native_extraction"] = "COMPLETE"
                 coverage["vision"] = document.get("vision_execution", {
@@ -331,11 +408,14 @@ def process_next_job(job_id=None, *, prepare_live_preview=False):
                 row.error_code=None
                 row.lease_until=None
                 db.commit()
+                _log_ingest(claimed, attempt, stage, "done", round((monotonic() - started) * 1000))
                 return {"result":"READY","job_id":claimed}
         except Exception as exc:
-            logger.warning("learningx_ingest_failed stage=%s exception=%s", stage, type(exc).__name__)
+            _log_ingest(claimed, attempt, stage, "failed", round((monotonic() - started) * 1000))
+            logger.warning("learningx_ingest_failed job=%s attempt=%s stage=%s exception=%s",
+                           claimed, attempt, stage, type(exc).__name__)
             db.rollback()
-            row=db.get(IngestJob,claimed)
+            row = _owned_job(db, claimed, attempt)
             if row:
                 # No raw slide text, stack trace, secrets or filenames in status.
                 row.status="FAILED"
@@ -343,7 +423,7 @@ def process_next_job(job_id=None, *, prepare_live_preview=False):
                                 and exc.status_code==503 else "INGEST_FAILED")
                 row.lease_until=None
                 db.commit()
-            return {"result":"FAILED","job_id":claimed}
+            return {"result":"FAILED" if row else "LEASE_LOST","job_id":claimed}
 
 
 @router.post("/internal/ingest/process")
