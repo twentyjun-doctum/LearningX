@@ -191,10 +191,12 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   const selection = {left:.2, top:.3, right:.4, bottom:.35};
   confusion = {spots:[{x:.3, y:.3, count:1, rects:[selection]}]};
   await until(()=>content.querySelector('.live-highlight')?.style.left==='20%','selected phrase gets an overlay');
-  confusion = {spots:[{x:.3, y:.3, count:2, rects:[selection]}]};
+  confusion = {spots:[{x:.3, y:.3, count:2, rects:[selection, {left:.23, top:.3, right:.31, bottom:.35},
+   {left:.2, top:.38, right:.85, bottom:.43}]}]};
   await until(()=>content.querySelector('.live-mark')?.textContent===2,'same-page live count updates');
   const badge = content.querySelector('.at-selection-corner');
-  assert.equal(badge.style.left,'40%');
+  assert.equal(badge.style.left,'40%','badge uses the first line, even when a later line extends farther right');
+  assert.equal(content.querySelector('.live-highlight-group').children.length,3,'overlaps share a single opacity layer');
   assert.equal(badge.style.top,'30%');
   assert.equal(content.children[0],sameFrame,'reactions update the overlay without replacing the slide');
   const oldDraw = painted.length;

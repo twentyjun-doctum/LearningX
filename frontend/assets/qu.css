@@ -235,6 +235,7 @@ button,input,textarea,select{font:inherit;color:inherit}
 .live-pdf-text > :not(.markedContent), .live-pdf-text .markedContent span:not(.markedContent) {z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height)); --scale-x: 1; --rotate: 0deg; transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));}
 .live-pdf-text .markedContent {display: contents;}
 .live-pdf-text ::selection {color: transparent; background: #4b83e878;}
+#student-slide .live-pdf-text ::selection {background: transparent;}
 
 html:has(#student-slide) {scrollbar-gutter: stable;}
 html.live-selecting {overflow: hidden; overflow-anchor: none;}
@@ -261,11 +262,12 @@ html.live-selecting {overflow: hidden; overflow-anchor: none;}
 
 .live-tab-number {display: none;}
 #teacher-slide:fullscreen .live-tab-number {display: inline; font-weight: 700;}
-.live-highlight {position: absolute; border-radius: .15rem; background: #1f9b6650;}
-.live-highlight.shallow {background: #77898050;}
-.live-highlight.mid {background: #45b87955;}
-.live-highlight.confused {background: #ffad365e;}
-.live-highlight.picked {background: #5075dc55;}
+.live-highlight-group {position:absolute; inset:0; opacity:.32; color:#1f9b66;}
+.live-highlight-group.shallow {color:#778980;}
+.live-highlight-group.mid {color:#45b879;}
+.live-highlight-group.confused {color:#ffad36; opacity:.37;}
+.live-highlight-group.picked {color:#5075dc;}
+.live-highlight {position:absolute; border-radius:.15rem; background:currentColor;}
 .live-mark:not(.picked) {width: 1.35rem; height: 1.35rem; display: grid; place-items: center; color: white; font-size: .67rem;}
 
 /* Faculty lesson file picker */
@@ -301,7 +303,7 @@ html.live-selecting {overflow: hidden; overflow-anchor: none;}
   .file-picker-action {grid-column:2; justify-self:start;}
 }
 
-.live-mark.at-selection-corner {transform:translate(2px, calc(-100% - 2px));}
+.live-mark.at-selection-corner {transform:translate(-100%, -100%); z-index:1;}
 
 #student-slide {position:relative;}
 #student-slide > .row:first-child {padding-right:2.1rem; gap:.5rem;}
