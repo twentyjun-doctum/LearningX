@@ -153,7 +153,7 @@ class SlideAnchor(BaseModel):
     x: float = Field(ge=0, le=1)
     y: float = Field(ge=0, le=1)
     quote: str = Field(default="", max_length=240)
-    rects: list[SlideRectangle] = Field(default_factory=list, max_length=16)
+    rects: list[SlideRectangle] = Field(default_factory=list, max_length=2048)
 
 
 class ConfusionRequest(BaseModel):

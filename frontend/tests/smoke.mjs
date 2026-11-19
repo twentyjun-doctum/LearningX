@@ -91,7 +91,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
      if (inner) return inner;
     }
     return null;
-   }, addEventListener(){}, removeEventListener(){}};
+   }, listeners:new Map(), addEventListener(type, fn){this.listeners.set(type,fn);}, removeEventListener(type){this.listeners.delete(type);}};
   fixture.append(...children);
   return fixture;
  }
@@ -147,9 +147,15 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  };
  const page = {getViewport:({scale})=>({width:100*scale,height:100*scale,scale}),
   render:()=>({promise:Promise.resolve()}),streamTextContent(){}};
+ const windowListeners = new Map();
+ const htmlClasses = new Set();
+ const mockWindow = {QU:{el:node,LEVEL:{}}, scrollX:0, scrollY:120, getSelection:()=>null,
+  scrollTo(x,y){this.scrollX=x; this.scrollY=y;},
+  addEventListener(type,fn){windowListeners.set(type,fn);}, removeEventListener(type){windowListeners.delete(type);}};
  const ctx = vm.createContext({
-  window:{QU:{el:node,LEVEL:{}},addEventListener(){},removeEventListener(){}},
-  document:{addEventListener(){},removeEventListener(){}}, innerHeight:720, devicePixelRatio:1,
+  window:mockWindow,
+  document:{addEventListener(){},removeEventListener(){},documentElement:{classList:{add:x=>htmlClasses.add(x),remove:x=>htmlClasses.delete(x)}}},
+  innerHeight:720, devicePixelRatio:1,
   URLSearchParams,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
   loadFixtureRenderer: async ()=>({
    GlobalWorkerOptions:{},TextLayer:class {async render(){}},
@@ -196,6 +202,19 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   releaseStalled(response);
   await new Promise(resolve=>setTimeout(resolve,25));
   assert.equal(lastRendered,'8 / 9','late old frame does not roll back the visible page');
+  const drag = {pointerId:1,pointerType:'mouse',button:0,target:{closest:()=>true}};
+  content.listeners.get('pointerdown')(drag);
+  assert.ok(htmlClasses.has('live-selecting'));
+  mockWindow.scrollY=180;
+  windowListeners.get('scroll')();
+  assert.equal(mockWindow.scrollY,120);
+  latest = slide(9,'v8');
+  timeline.push(latest);
+  await until(()=>calls.some(([version])=>version==='v8'),'new page is fetched during text selection');
+  assert.equal(view.page(),8,'selection keeps the current slide in place');
+  windowListeners.get('pointerup')(drag);
+  await until(()=>view.page()===9,'latest page resumes after selection');
+  assert.ok(!htmlClasses.has('live-selecting'));
  } finally {
   releaseOld(response);
   releaseStalled(response);

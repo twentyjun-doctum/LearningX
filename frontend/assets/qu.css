@@ -233,7 +233,11 @@ button,input,textarea,select{font:inherit;color:inherit}
 .live-pdf-text .markedContent {display: contents;}
 .live-pdf-text ::selection {color: transparent; background: #4b83e878;}
 
+html:has(#student-slide) {scrollbar-gutter: stable;}
+html.live-selecting {overflow: hidden; overflow-anchor: none;}
+#student-slide {overflow-anchor: none;}
 .live-actions {flex-wrap: wrap; margin-bottom: .5rem;}
+.live-actions [data-live-feedback] {flex: 1 0 100%; min-width: 0; min-height: 1.25rem; line-height: 1.25rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;}
 .live-marks {position: absolute; inset: 0; pointer-events: none; z-index: 2;}
 .live-mark {position: absolute; width: .8rem; height: .8rem; border: 2px solid white; border-radius: 50%; background: #13806a; transform: translate(-50%, -50%);}
 .live-mark.picked {background: #315dba;}
