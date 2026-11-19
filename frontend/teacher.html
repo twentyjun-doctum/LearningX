@@ -59,8 +59,17 @@
         <input id="course-title" class="input" placeholder="예: 3주차 · 의제설정 이론" maxlength="180">
       </div>
       <div class="field">
-        <label for="upload-file">교안 파일 (PDF·PPTX, 40MB까지)</label>
-        <input id="upload-file" class="input" type="file" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+        <span class="file-picker-title" id="upload-file-title">교안 파일</span>
+        <input id="upload-file" class="sr-only" type="file" aria-labelledby="upload-file-title upload-picker-action"
+          aria-describedby="upload-picker-meta" accept=".pdf,.pptx,application/pdf,application/vnd.openxmlformats-officedocument.presentationml.presentation">
+        <label class="file-picker" for="upload-file" id="upload-picker">
+          <span class="file-picker-icon" aria-hidden="true"></span>
+          <span class="file-picker-copy" aria-live="polite">
+            <strong id="upload-picker-name">교안을 여기에 놓으세요</strong>
+            <span id="upload-picker-meta">PDF 또는 PPTX · 최대 40MB</span>
+          </span>
+          <span class="file-picker-action" id="upload-picker-action">파일 선택</span>
+        </label>
       </div>
       <div class="card tight stack" id="upload-progress" hidden>
         <div class="row between"><b id="upload-name"></b><span class="muted" id="upload-state"></span></div>
