@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
 from . import engine_adapter as nit
@@ -33,7 +33,7 @@ from . import private_store
 from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
 from .live_timing import LiveTimingRoute, record_phase
-from .security import actor, issue_token, require_course, scheme, session
+from .security import actor, decode_token, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, SessionLocal, User, uid
 
 router = APIRouter(prefix="/v1", route_class=LiveTimingRoute)
@@ -365,20 +365,51 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
     return _public_session(db, s, faculty=True)
 
 
+def _live_reader(db, credentials, session_id):
+    claims = decode_token(credentials)
+    row = db.execute(
+        select(User, ClassSession, Member.role, SessionParticipant.user_id)
+        .select_from(User)
+        .outerjoin(ClassSession, ClassSession.id == session_id)
+        .outerjoin(Member, (Member.course_id == ClassSession.course_id) & (Member.user_id == User.id))
+        .outerjoin(SessionParticipant,
+                   (SessionParticipant.session_id == ClassSession.id) & (SessionParticipant.user_id == User.id))
+        .where(User.id == claims["sub"])
+    ).one_or_none()
+    if row is None or not row[0].active:
+        raise HTTPException(401, "Inactive or unknown user")
+    user, current, member_role, participant = row
+    scoped = claims.get("scope") is not None or user.email.endswith("@join.question-up.local")
+    if scoped:
+        if claims.get("scope") != "classroom" or not claims.get("session_id"):
+            raise HTTPException(403, "Session-scoped authentication required")
+        if claims["session_id"] != session_id:
+            raise HTTPException(403, "Token belongs to a different session")
+        if participant is None:
+            raise HTTPException(403, "Not a participant of this session")
+    if current is None:
+        raise HTTPException(404, "Session not found")
+    faculty = member_role == "faculty"
+    if not faculty:
+        if member_role is None or (member_role != "student" and user.role != "admin"):
+            raise HTTPException(403, "Course access denied")
+        if participant is None:
+            raise HTTPException(403, "Not a participant of this session")
+    return user, current, faculty
+
+
 def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False):
     # Keep checkout, authorization and release on one worker. A parked poll must
     # not hold a connection while it queues for a worker to build its response.
     record_phase(request, "worker_queue", queued)
     started = time.perf_counter()
     with SessionLocal() as db:
-        user = actor(request, credentials, db)
+        user, current, faculty = _live_reader(db, credentials, session_id)
         record_phase(request, "auth", started)
         started = time.perf_counter()
         if access_only:
-            _live_access(db, session_id, user)
-            record_phase(request, "access", started)
             return
-        result = _snapshot(db, session_id, user, version, cursor)
+        result = _snapshot(db, current, user, faculty, version, cursor)
         record_phase(request, "snapshot", started)
         return result
 
@@ -401,18 +432,6 @@ async def live_snapshot(session_id: str, request: Request, response: Response, v
     return {**snapshot, "revision": stamp, "index_version": index_stamp}
 
 
-def _live_access(db, session_id, user):
-    current = _session_or_404(db, session_id)
-    member = db.query(Member).filter_by(course_id=current.course_id, user_id=user.id).first()
-    faculty = member is not None and member.role == "faculty"
-    if not faculty:
-        if not member or (member.role != "student" and user.role != "admin"):
-            raise HTTPException(403, "Course access denied")
-        if not db.query(SessionParticipant).filter_by(session_id=session_id, user_id=user.id).first():
-            raise HTTPException(403, "Not a participant of this session")
-    return current, faculty
-
-
 def _slide_metadata(slide, version=""):
     if slide is None:
         return None
@@ -425,8 +444,8 @@ def _slide_metadata(slide, version=""):
     return metadata
 
 
-def _snapshot(db, session_id, user, version, cursor=None):
-    current, faculty = _live_access(db, session_id, user)
+def _snapshot(db, current, user, faculty, version, cursor=None):
+    session_id = current.id
     if current.status == "CLOSED":
         return {"status": current.status, "slide": None, "index": []}
     slide = db.get(LiveSlide, session_id, options=[undefer(LiveSlide.content)])
@@ -502,9 +521,13 @@ def live_document(session_id: str, db: Session = Depends(session), user: User = 
 
 
 @router.get("/sessions/{session_id}/live/page/{version}")
-def live_page(session_id: str, version: str, request: Request, page: int | None = None, db: Session = Depends(session), user: User = Depends(actor)):
+def live_page(session_id: str, version: str, request: Request, page: int | None = None,
+              db: Session = Depends(session),
+              credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     started = time.perf_counter()
-    current, _ = _live_access(db, session_id, user)
+    _, current, _ = _live_reader(db, credentials, session_id)
+    record_phase(request, "auth", started)
+    started = time.perf_counter()
     slide = db.get(LiveSlide, session_id, options=[undefer(LiveSlide.content)])
     if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
@@ -553,9 +576,11 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
     record_phase(request, "prepare", started)
     started = time.perf_counter()
     user = actor(request, credentials, db)
-    current = _faculty_session(db, session_id, user)
-    # Serialize presenters sharing the same classroom.
-    db.refresh(current, with_for_update=True)
+    # Lock the current row before rechecking course membership and state.
+    current = db.get(ClassSession, session_id, with_for_update=True)
+    if current is None:
+        raise HTTPException(404, "Session not found")
+    require_course(db, current.course_id, user, "faculty")
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     history = db.query(LiveTransition).filter_by(session_id=session_id)
@@ -583,7 +608,10 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
         encoded = json.dumps(content, ensure_ascii=False)
         db.add(LiveTransition(session_id=session_id, position=sequence,
                               page=page, total=total, version=version, content=encoded))
-    db.merge(LiveSlide(session_id=session_id, page=page, total=total, version=version, content=encoded))
+    if initial is None:
+        db.add(LiveSlide(session_id=session_id, page=page, total=total, version=version, content=encoded))
+    else:
+        initial.page, initial.total, initial.version, initial.content = page, total, version, encoded
     db.commit()
     record_phase(request, "write", started)
     notify(session_id)

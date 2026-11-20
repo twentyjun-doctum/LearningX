@@ -26,13 +26,16 @@ def issue_token(user_id:str, minutes:int=60, *, session_id:str|None=None):
         claims.update(scope="classroom",session_id=session_id)
     return jwt.encode(claims,secret(),algorithm="HS256")
 
-def actor(request:Request, credentials:HTTPAuthorizationCredentials=Depends(scheme), db:Session=Depends(session)):
+def decode_token(credentials):
     if credentials is None:
         raise HTTPException(401,"Authentication required")
     try:
-        p=jwt.decode(credentials.credentials,secret(),algorithms=["HS256"],audience="learningx",issuer="learningx-server",options={"require":["exp","sub","iat"]})
+        return jwt.decode(credentials.credentials,secret(),algorithms=["HS256"],audience="learningx",issuer="learningx-server",options={"require":["exp","sub","iat"]})
     except (jwt.InvalidTokenError, ValueError):
         raise HTTPException(401,"Invalid or expired token")
+
+def actor(request:Request, credentials:HTTPAuthorizationCredentials=Depends(scheme), db:Session=Depends(session)):
+    p=decode_token(credentials)
     user=db.get(User,p["sub"])
     if user is None or not user.active:
         raise HTTPException(401,"Inactive or unknown user")
