@@ -37,10 +37,11 @@
     frame.style.setProperty('--total-scale-factor', String(viewport.scale * (viewport.userUnit || 1)));
     const text = el('div', {class: 'live-pdf-text textLayer'});
     frame.append(text);
-    await Promise.all([
-      page.render({canvas, viewport, transform: [ratio, 0, 0, ratio, 0, 0]}).promise,
-      new lib.TextLayer({textContentSource: page.streamTextContent(), container: text, viewport}).render(),
-    ]);
+    // Show the slide as soon as it is painted; the selectable text layer follows.
+    const drawn = page.render({canvas, viewport, transform: [ratio, 0, 0, ratio, 0, 0]}).promise;
+    frame.textReady = new lib.TextLayer({textContentSource: page.streamTextContent(), container: text, viewport})
+      .render().catch(() => {});
+    await drawn;
     return frame;
   }
 
@@ -362,15 +363,16 @@
         const bytes = await pageBytes(target, number);
         // PDF.js transfers the input to its worker. Keep the cached bytes intact.
         const pdf = await loadPdf(bytes.slice(0));
+        let frame;
         try {
-          const frame = await renderPage(pdf, 1, w, h);
+          frame = await renderPage(pdf, 1, w, h);
           if (!stopped && (faculty || target.version === slide?.version)) {
             frames.delete(inFlight);
             cached(rendered, () => Promise.resolve(frame));
           }
           return frame;
         } finally {
-          pdf.doc.destroy().catch(() => {});
+          Promise.resolve(frame?.textReady).finally(() => pdf.doc.destroy().catch(() => {}));
         }
       });
     }
