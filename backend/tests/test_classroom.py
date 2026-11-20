@@ -195,6 +195,17 @@ class ClassroomTests(unittest.TestCase):
         packed = self.req("GET", path, student, params={"inline_page": True})
         self.assertEqual(packed.headers["content-type"], classroom.LIVE_PAGE_CONTENT_TYPE)
         self.assertEqual(packed.headers["cache-control"], "no-store")
+        fast_params = {"inline_page": True, "partial_page": True,
+                       "version": first_publish.json()["version"], "after": before}
+        with patch.object(classroom, "_snapshot", side_effect=AssertionError("full snapshot must be skipped")):
+            fast = self.req("GET", path, student, params=fast_params)
+        self.assertEqual(fast.headers["content-type"], classroom.LIVE_PAGE_CONTENT_TYPE)
+        fast_end = 4 + int.from_bytes(fast.content[:4], "big")
+        fast_metadata = json.loads(fast.content[4:fast_end])
+        self.assertTrue(fast_metadata["partial"])
+        self.assertNotIn("index", fast_metadata)
+        self.assertEqual(fast.content[fast_end:], packed.content[4 + int.from_bytes(packed.content[:4], "big"):])
+
         end = 4 + int.from_bytes(packed.content[:4], "big")
         self.assertEqual(json.loads(packed.content[4:end])["slide"]["version"], state["slide"]["version"])
         with pymupdf.open(stream=packed.content[end:], filetype="pdf") as pdf:
@@ -225,7 +236,7 @@ class ClassroomTests(unittest.TestCase):
         with patch.object(classroom, "build_snapshot", side_effect=close_before_publish) as build:
             self.assertEqual(self.req("PUT", path, self.tf, json={"page": 3}).status_code, 409)
         build.assert_called_once()
-        self.assertIsNone(self.req("GET", path, student, params={"inline_page": True}).json()["slide"])
+        self.assertIsNone(self.req("GET", path, student, params=fast_params).json()["slide"])
         self.assertEqual(self.req("GET", page, student).status_code, 409)
 
 

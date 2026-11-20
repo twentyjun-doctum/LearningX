@@ -408,7 +408,7 @@ def _live_reader(db, credentials, session_id, *, include_page=False):
     return user, current, faculty, *page_data
 
 
-def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False, inline_page=False):
+def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False, inline_page=False, partial_page=False):
     # Keep checkout, authorization and release on one worker. A parked poll must
     # not hold a connection while it queues for a worker to build its response.
     record_phase(request, "worker_queue", queued)
@@ -419,6 +419,14 @@ def _read_live(request, credentials, session_id, version, cursor, queued, *, acc
         started = time.perf_counter()
         if access_only:
             return
+        if partial_page and not faculty and current.status == "OPEN" and page_data:
+            current_slide, material = page_data
+            if current_slide is not None and current_slide.version != version:
+                slide = _slide_metadata(current_slide, version)
+                prepared = cached_live_page(material, slide["page"]) if slide.get("pdf") else None
+                if prepared and len(prepared) <= MAX_INLINE_PAGE_BYTES:
+                    record_phase(request, "partial_page", started)
+                    return {"status": current.status, "slide": slide, "partial": True}, prepared
         result = _snapshot(db, current, user, faculty, version, cursor)
         record_phase(request, "snapshot", started)
         slide = result["slide"]
@@ -433,7 +441,7 @@ def _read_live(request, credentials, session_id, version, cursor, queued, *, acc
 @router.get("/sessions/{session_id}/live")
 async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
                         after: str | None = None, index_version: str = "", cursor: str | None = None,
-                        inline_page: bool = False,
+                        inline_page: bool = False, partial_page: bool = False,
                         credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     if after is not None and after == revision(session_id) and (cursor is None or cursor == version):
         await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor, time.perf_counter(), access_only=True)
@@ -442,13 +450,16 @@ async def live_snapshot(session_id: str, request: Request, response: Response, v
         record_phase(request, "poll_wait", started)
     stamp = revision(session_id)
     snapshot, pdf = await run_in_threadpool(
-        _read_live, request, credentials, session_id, version, cursor, time.perf_counter(), inline_page=inline_page
+        _read_live, request, credentials, session_id, version, cursor, time.perf_counter(), inline_page=inline_page,
+        partial_page=partial_page and inline_page and bool(version) and after is not None and cursor is None,
     )
     response.headers["Cache-Control"] = "no-store"
-    index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
-    if index_version == index_stamp:
-        del snapshot["index"]
-    result = {**snapshot, "revision": stamp, "index_version": index_stamp}
+    result = {**snapshot, "revision": stamp}
+    if "index" in snapshot:
+        index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
+        if index_version == index_stamp:
+            del result["index"]
+        result["index_version"] = index_stamp
     if pdf is not None:
         metadata = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
         # Four-byte big-endian metadata length, UTF-8 JSON, then one raw PDF page.

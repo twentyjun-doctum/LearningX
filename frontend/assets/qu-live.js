@@ -463,7 +463,10 @@
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
-        if (tryInlinePage) params.set('inline_page', 'true');
+        if (tryInlinePage) {
+          params.set('inline_page', 'true');
+          params.set('partial_page', 'true');
+        }
         let serverTiming;
         const data = await api(path + '?' + params, {
           timeout: 10000,
@@ -472,8 +475,8 @@
         });
         if (stopped) return;
         tryInlinePage = !faculty;
-        stamp = data.revision;
-        if (stamp === undefined) delay = 2000;
+        stamp = data.partial ? undefined : data.revision;
+        if (!data.partial && stamp === undefined) delay = 2000;
         if (data.slide && (data.slide.sequence ?? 0) < (slide?.sequence ?? 0)) return;
         if (data.slide && (data.slide.sequence ?? 0) >= (confirmed?.sequence ?? 0)) confirmed = data.slide;
         const changed = slide?.version !== data.slide?.version;
@@ -495,11 +498,11 @@
           if (slide?.visible_pages) visiblePages = slide.visible_pages;
           if (selected === null || slide?.page === selected) navigation = slide;
         }
-        indexVersion = data.index_version;
+        if (!data.partial) indexVersion = data.index_version;
         if (data.index) items = data.index;
         open = data.status === 'OPEN';
         if (!open) hideSelectionActions();
-        confusion = data.confusion;
+        if (!data.partial || changed) confusion = data.confusion;
         if (changed && (selected === null || data.status === 'CLOSED')) {
           retryCount = 0;
           follow(slide);
