@@ -31,7 +31,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
+from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
 from .security import actor, decode_token, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, SessionLocal, User, uid
@@ -40,6 +40,8 @@ router = APIRouter(prefix="/v1", route_class=LiveTimingRoute)
 
 JOIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I
 JOIN_LENGTH = 6
+LIVE_PAGE_CONTENT_TYPE = "application/vnd.question-up.live-page"
+MAX_INLINE_PAGE_BYTES = 2 * 1024 * 1024
 STUDENT_TOKEN_MINUTES = 240
 LEVEL_MAP = {"clarify": "shallow", "apply": "mid", "analyze": "mid",
              "evaluate": "deep", "create": "deep"}
@@ -406,25 +408,32 @@ def _live_reader(db, credentials, session_id, *, include_page=False):
     return user, current, faculty, *page_data
 
 
-def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False):
+def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False, inline_page=False):
     # Keep checkout, authorization and release on one worker. A parked poll must
     # not hold a connection while it queues for a worker to build its response.
     record_phase(request, "worker_queue", queued)
     started = time.perf_counter()
     with SessionLocal() as db:
-        user, current, faculty = _live_reader(db, credentials, session_id)
+        user, current, faculty, *page_data = _live_reader(db, credentials, session_id, include_page=inline_page)
         record_phase(request, "auth", started)
         started = time.perf_counter()
         if access_only:
             return
         result = _snapshot(db, current, user, faculty, version, cursor)
         record_phase(request, "snapshot", started)
-        return result
+        slide = result["slide"]
+        if inline_page and not faculty and slide and slide["version"] != version and slide.get("pdf"):
+            _, material = page_data
+            prepared = cached_live_page(material, slide["page"])
+            if prepared is not None and len(prepared) <= MAX_INLINE_PAGE_BYTES:
+                return result, prepared
+        return result, None
 
 
 @router.get("/sessions/{session_id}/live")
 async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
                         after: str | None = None, index_version: str = "", cursor: str | None = None,
+                        inline_page: bool = False,
                         credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     if after is not None and after == revision(session_id) and (cursor is None or cursor == version):
         await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor, time.perf_counter(), access_only=True)
@@ -432,12 +441,21 @@ async def live_snapshot(session_id: str, request: Request, response: Response, v
         await wait_for_update(session_id, after)
         record_phase(request, "poll_wait", started)
     stamp = revision(session_id)
-    snapshot = await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor, time.perf_counter())
+    snapshot, pdf = await run_in_threadpool(
+        _read_live, request, credentials, session_id, version, cursor, time.perf_counter(), inline_page=inline_page
+    )
     response.headers["Cache-Control"] = "no-store"
     index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
     if index_version == index_stamp:
         del snapshot["index"]
-    return {**snapshot, "revision": stamp, "index_version": index_stamp}
+    result = {**snapshot, "revision": stamp, "index_version": index_stamp}
+    if pdf is not None:
+        metadata = json.dumps(result, ensure_ascii=False, separators=(",", ":")).encode()
+        # Four-byte big-endian metadata length, UTF-8 JSON, then one raw PDF page.
+        return Response(b"".join((len(metadata).to_bytes(4, "big"), metadata, pdf)),
+                        media_type=LIVE_PAGE_CONTENT_TYPE,
+                        headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
+    return result
 
 
 def _slide_metadata(slide, version=""):

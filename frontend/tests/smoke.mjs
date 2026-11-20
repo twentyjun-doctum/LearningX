@@ -137,8 +137,18 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   if (!url.pathname.includes('/page/')) {
    await new Promise(resolve => setTimeout(resolve,8));
    const cursor = timeline.findIndex(item=>item.version===url.searchParams.get('cursor'));
-   return {status:'OPEN', slide:latest, index:[], revision:latest.version, confusion,
+   const data = {status:'OPEN', slide:latest, index:[], revision:latest.version, confusion,
     transitions: cursor >= 0 ? timeline.slice(cursor+1) : []};
+   if (latest.version === 'v7' && url.searchParams.get('version') !== 'v7') {
+    assert.equal(url.searchParams.get('inline_page'), 'true');
+    const metadata = new TextEncoder().encode(JSON.stringify(data));
+    const framed = new Uint8Array(4 + metadata.length + 10);
+    new DataView(framed.buffer).setUint32(0, metadata.length);
+    framed.set(metadata, 4);
+    return readBody({headers: new Headers({'Content-Type':'application/vnd.question-up.live-page'}),
+      arrayBuffer: async () => framed.buffer});
+   }
+   return data;
   }
   calls.push([url.pathname.split('/').pop(),Number(url.searchParams.get('page'))]);
   if (url.pathname.endsWith('/v6')) return readBody(await stalled);
@@ -159,7 +169,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   window:mockWindow,
   document:{addEventListener(){},removeEventListener(){},documentElement:{classList:{add:x=>htmlClasses.add(x),remove:x=>htmlClasses.delete(x)}}},
   innerHeight:720, devicePixelRatio:1,
-  URLSearchParams,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
+  URLSearchParams,TextDecoder,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
   loadFixtureRenderer: async ()=>({
    GlobalWorkerOptions:{},TextLayer:class {async render(){}},
    getDocument:()=>({promise:Promise.resolve({getPage:async()=>page,destroy:async()=>{},numPages:1})}),
@@ -207,6 +217,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   timeline.push(latest);
   await until(()=>view.page()===8,'latest page catches up while past download is stalled');
   assert.deepEqual(painted.slice(-2),['1 / 9','8 / 9']);
+  assert.ok(!calls.some(([version])=>version==='v7'),'inline PDF avoids a second HTTP request');
   releaseStalled(response);
   await new Promise(resolve=>setTimeout(resolve,25));
   assert.equal(lastRendered,'8 / 9','late old frame does not roll back the visible page');

@@ -192,6 +192,20 @@ class ClassroomTests(unittest.TestCase):
         state = self.req("GET", path, student, params={"after": before}).json()
         self.assertNotEqual(state["revision"], before)
         self.assertTrue(state["slide"]["pdf"])
+        packed = self.req("GET", path, student, params={"inline_page": True})
+        self.assertEqual(packed.headers["content-type"], classroom.LIVE_PAGE_CONTENT_TYPE)
+        self.assertEqual(packed.headers["cache-control"], "no-store")
+        end = 4 + int.from_bytes(packed.content[:4], "big")
+        self.assertEqual(json.loads(packed.content[4:end])["slide"]["version"], state["slide"]["version"])
+        with pymupdf.open(stream=packed.content[end:], filetype="pdf") as pdf:
+            self.assertEqual(pdf[0].get_text().strip(), "Visible slide text")
+        unchanged = self.req("GET", path, student, params={"inline_page": True, "version": state["slide"]["version"]})
+        self.assertEqual(unchanged.headers["content-type"], "application/json")
+        with patch.object(classroom, "cached_live_page", return_value=None):
+            cold = self.req("GET", path, student, params={"inline_page": True})
+        self.assertEqual(cold.json()["slide"]["version"], state["slide"]["version"])
+        self.assertEqual(self.req("GET", path, self.to, params={"inline_page": True}).status_code, 403)
+
         page = path + "/page/" + state["slide"]["version"]
         self.assertEqual(self.req("GET", page, self.to).status_code, 403)
         response = self.req("GET", page, student)
@@ -211,7 +225,7 @@ class ClassroomTests(unittest.TestCase):
         with patch.object(classroom, "build_snapshot", side_effect=close_before_publish) as build:
             self.assertEqual(self.req("PUT", path, self.tf, json={"page": 3}).status_code, 409)
         build.assert_called_once()
-        self.assertIsNone(self.req("GET", path, student).json()["slide"])
+        self.assertIsNone(self.req("GET", path, student, params={"inline_page": True}).json()["slide"])
         self.assertEqual(self.req("GET", page, student).status_code, 409)
 
 

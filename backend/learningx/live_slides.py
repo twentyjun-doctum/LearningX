@@ -246,3 +246,10 @@ def warm_live_pages(material, pages):
                 return
     finally:
         _warm_lock.release()
+
+
+def cached_live_page(material, page):
+    """Return a prepared page without storage I/O or PDF splitting."""
+    if material is None:
+        return None
+    return _cached_page((_identity(material), page))

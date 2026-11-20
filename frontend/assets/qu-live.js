@@ -443,18 +443,35 @@
       return true;
     }
 
+    async function readLiveUpdate(response) {
+      if (!response.headers.get('Content-Type')?.startsWith('application/vnd.question-up.live-page')) {
+        return response.json();
+      }
+      const buffer = await response.arrayBuffer();
+      const length = new DataView(buffer).getUint32(0);
+      const end = 4 + length;
+      if (end >= buffer.byteLength) throw new Error('Incomplete live page response');
+      const data = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
+      return {...data, inlinePdf: buffer.slice(end)};
+    }
+
+    let tryInlinePage = !faculty;
+
     async function tick() {
       let delay = 0;
       try {
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
+        if (tryInlinePage) params.set('inline_page', 'true');
         let serverTiming;
         const data = await api(path + '?' + params, {
           timeout: 10000,
+          readBody: faculty ? undefined : readLiveUpdate,
           onResponse: liveTimingEnabled ? response => { serverTiming = response.headers.get('Server-Timing'); } : undefined,
         });
         if (stopped) return;
+        tryInlinePage = !faculty;
         stamp = data.revision;
         if (stamp === undefined) delay = 2000;
         if (data.slide && (data.slide.sequence ?? 0) < (slide?.sequence ?? 0)) return;
@@ -467,7 +484,14 @@
             retainedBytes = 0;
           }
           slide = data.slide;
-          if (!faculty && slide) liveMark?.('student-detected', slide.version, slide.page, undefined, serverTiming);
+          if (!faculty && slide) {
+            liveMark?.('student-detected', slide.version, slide.page, undefined, serverTiming);
+            if (data.inlinePdf) {
+              pageFiles.set(slide.version + ':' + slide.page, data.inlinePdf);
+              retainedBytes = data.inlinePdf.byteLength;
+              liveMark?.('pdf-inline-received', slide.version, slide.page);
+            }
+          }
           if (slide?.visible_pages) visiblePages = slide.visible_pages;
           if (selected === null || slide?.page === selected) navigation = slide;
         }
@@ -492,6 +516,7 @@
           status.textContent = '교안 접근 권한이 없습니다.';
           return;
         }
+        tryInlinePage = false;  // Retry with metadata only if the combined response stalled.
         status.textContent = '연결을 다시 확인하는 중입니다.';
         delay = 1200;
       } finally {
