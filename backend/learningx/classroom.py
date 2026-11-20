@@ -21,7 +21,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
@@ -31,7 +31,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
+from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
 from .security import actor, decode_token, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, SessionLocal, User, uid
@@ -300,7 +300,7 @@ def _throttle(request: Request):
 # ---------- faculty endpoints ----------
 
 @router.post("/courses/{course_id}/sessions", status_code=201)
-def open_session(course_id: str, data: OpenSession, db: Session = Depends(session), user: User = Depends(actor)):
+def open_session(course_id: str, data: OpenSession, background_tasks: BackgroundTasks, db: Session = Depends(session), user: User = Depends(actor)):
     require_course(db, course_id, user, "faculty")
     c = db.get(Course, course_id)
     m = db.get(Material, data.material_id)
@@ -317,6 +317,7 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
         raise HTTPException(422, "No visible pages are available")
     first = pages[0]
     total, content = build_snapshot(m, first)
+    db.expunge(m)
     for old in db.query(ClassSession).filter(ClassSession.course_id == course_id,
                                              ClassSession.status != "CLOSED").all():
         old.status = "CLOSED"
@@ -328,6 +329,7 @@ def open_session(course_id: str, data: OpenSession, db: Session = Depends(sessio
     db.add(first_slide)
     _audit(db, user.id, course_id, "session_opened", m.id)
     db.commit()
+    background_tasks.add_task(warm_live_pages, m, pages)
     return {**_public_session(db, s, faculty=True),
             "initial_live": {"status": s.status, "slide": {**_slide_metadata(first_slide), "visible_pages": pages},
                              "index": []}}
@@ -365,9 +367,9 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
     return _public_session(db, s, faculty=True)
 
 
-def _live_reader(db, credentials, session_id):
+def _live_reader(db, credentials, session_id, *, include_page=False):
     claims = decode_token(credentials)
-    row = db.execute(
+    query = (
         select(User, ClassSession, Member.role, SessionParticipant.user_id)
         .select_from(User)
         .outerjoin(ClassSession, ClassSession.id == session_id)
@@ -375,10 +377,16 @@ def _live_reader(db, credentials, session_id):
         .outerjoin(SessionParticipant,
                    (SessionParticipant.session_id == ClassSession.id) & (SessionParticipant.user_id == User.id))
         .where(User.id == claims["sub"])
-    ).one_or_none()
+    )
+    if include_page:
+        query = (query.add_columns(LiveSlide, Material)
+                 .outerjoin(LiveSlide, LiveSlide.session_id == ClassSession.id)
+                 .outerjoin(Material, Material.id == ClassSession.material_id)
+                 .options(undefer(LiveSlide.content)))
+    row = db.execute(query).one_or_none()
     if row is None or not row[0].active:
         raise HTTPException(401, "Inactive or unknown user")
-    user, current, member_role, participant = row
+    user, current, member_role, participant, *page_data = row
     scoped = claims.get("scope") is not None or user.email.endswith("@join.question-up.local")
     if scoped:
         if claims.get("scope") != "classroom" or not claims.get("session_id"):
@@ -395,7 +403,7 @@ def _live_reader(db, credentials, session_id):
             raise HTTPException(403, "Course access denied")
         if participant is None:
             raise HTTPException(403, "Not a participant of this session")
-    return user, current, faculty
+    return user, current, faculty, *page_data
 
 
 def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False):
@@ -525,10 +533,9 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
               db: Session = Depends(session),
               credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     started = time.perf_counter()
-    _, current, _ = _live_reader(db, credentials, session_id)
+    _, current, _, slide, material = _live_reader(db, credentials, session_id, include_page=True)
     record_phase(request, "auth", started)
     started = time.perf_counter()
-    slide = db.get(LiveSlide, session_id, options=[undefer(LiveSlide.content)])
     if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
     historical = slide.version != version
@@ -539,7 +546,6 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
     content = json.loads(slide.content)
     if not content.get("pdf"):
         raise HTTPException(404, "No PDF for this page")
-    material = db.get(Material, current.material_id)
     target = slide.page if page is None else page
     allowed = (slide.page,) if historical else (slide.page, content.get("before"), content.get("after"))
     if target not in allowed:

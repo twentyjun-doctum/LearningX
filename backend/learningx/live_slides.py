@@ -45,6 +45,7 @@ class QuestionSlide(Base):
 _revisions = OrderedDict()
 _revision_lock = Lock()
 _pdf_lock = Lock()
+_warm_lock = Lock()
 _page_load_locks = tuple(Lock() for _ in range(16))
 _page_cache_lock = Lock()
 _page_cache = OrderedDict()
@@ -230,3 +231,18 @@ def _load_page(identity, page):
 
 def page_pdf(material, page):
     return _page_pdf(_identity(material), page)
+
+
+def warm_live_pages(material, pages):
+    """Prepare the opening pages after the teacher response, without DB access."""
+    if not pages or not _warm_lock.acquire(blocking=False):
+        return
+    try:
+        for page in pages[:8]:
+            try:
+                page_pdf(material, page)
+            except Exception:
+                # The normal authorized request still reports the storage error.
+                return
+    finally:
+        _warm_lock.release()
