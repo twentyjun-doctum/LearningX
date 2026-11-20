@@ -12,6 +12,7 @@ import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shutil
 import tempfile
 from threading import Event, Thread
 from time import monotonic
@@ -375,6 +376,16 @@ def _run_claimed_job(claimed, attempt, prepare_live_preview):
                             preview_ready = False
                     if not preview_ready:
                         logger.warning("learningx_live_preview_unavailable")
+                prepared_pages = 0
+                if prepare_live_preview and (ext == ".pdf" or preview_ready):
+                    from .live_slides import prepare_live_pages
+                    advance("live_pages")
+                    source_pdf = original if ext == ".pdf" else parsed / "live-preview.pdf"
+                    try:
+                        prepared_pages = prepare_live_pages(root, source_pdf, document["pages"])
+                    except Exception:
+                        shutil.rmtree(parsed / "live-pages", ignore_errors=True)
+                        logger.warning("learningx_live_pages_unavailable")
                 advance("publish")
                 # The row lock fences storage publication as all attempts
                 # write the same immutable-material prefix.
@@ -391,6 +402,7 @@ def _run_claimed_job(claimed, attempt, prepare_live_preview):
                 coverage["ocr"] = document["deep_analysis"]["ocr"]
                 coverage["semantic_analysis"] = "NOT_RUN"
                 coverage["faculty_approval_required"] = True
+                coverage["live_pages_prepared"] = prepared_pages
                 if ext==".pptx":
                     coverage["live_preview"] = "READY" if preview_ready else "UNAVAILABLE"
                     coverage.setdefault("audio_status","UNKNOWN_NOT_VERIFIED")

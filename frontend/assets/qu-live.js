@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const {el, LEVEL, liveMark} = window.QU;
+  const {el, LEVEL, liveMark, liveTimingEnabled} = window.QU;
   const pdfBase = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
   let pdfLibrary;
   function warmPdf() {
@@ -62,6 +62,7 @@
     let deck = null;
     let slide = initial?.slide ?? null;
     let selected = null;
+    let confirmed = slide;
     let navigation = null;
     let visiblePages = slide?.visible_pages ?? [];
     let displayed = null;
@@ -328,7 +329,8 @@
       const pending = api(url, {
         timeout: 12000,
         readBody: response => {
-          if (!faculty) liveMark?.('pdf-headers', target.version, number);
+          if (!faculty) liveMark?.('pdf-headers', target.version, number, undefined,
+            liveTimingEnabled ? response.headers.get('Server-Timing') : undefined);
           return response.arrayBuffer();
         },
       }).then(bytes => {
@@ -447,10 +449,16 @@
         const params = new URLSearchParams({version: slide?.version || ''});
         if (stamp !== undefined) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
-        const data = await api(path + '?' + params, {timeout: 10000});
+        let serverTiming;
+        const data = await api(path + '?' + params, {
+          timeout: 10000,
+          onResponse: liveTimingEnabled ? response => { serverTiming = response.headers.get('Server-Timing'); } : undefined,
+        });
         if (stopped) return;
         stamp = data.revision;
         if (stamp === undefined) delay = 2000;
+        if (data.slide && (data.slide.sequence ?? 0) < (slide?.sequence ?? 0)) return;
+        if (data.slide && (data.slide.sequence ?? 0) >= (confirmed?.sequence ?? 0)) confirmed = data.slide;
         const changed = slide?.version !== data.slide?.version;
         if (changed) {
           if (!faculty) {
@@ -459,7 +467,7 @@
             retainedBytes = 0;
           }
           slide = data.slide;
-          if (!faculty && slide) liveMark?.('student-detected', slide.version, slide.page);
+          if (!faculty && slide) liveMark?.('student-detected', slide.version, slide.page, undefined, serverTiming);
           if (slide?.visible_pages) visiblePages = slide.visible_pages;
           if (selected === null || slide?.page === selected) navigation = slide;
         }
@@ -561,7 +569,12 @@
     }
     return {
       stop, select, resize, page: () => displayed,
-      acknowledge: result => { if (!stopped && (selected === null || selected === result.page)) navigation = result; },
+      confirmedVersion: () => confirmed?.version,
+      acknowledge: result => {
+        if (stopped || (result.sequence ?? 0) < (confirmed?.sequence ?? 0)) return;
+        if (result.version) confirmed = result;
+        if (selected === null || selected === result.page) navigation = result;
+      },
       neighbor: delta => {
         if (!deck) return null;
         const current = selected ?? slide?.page ?? displayed;

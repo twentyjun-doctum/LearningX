@@ -152,6 +152,11 @@ class ClassroomTests(unittest.TestCase):
         self.assertEqual(self.req("GET", path + "/document", student).status_code, 403)
         self.assertEqual(self.req("GET", path + "/document", self.tf).status_code, 200)
         self.assertEqual(self.req("PUT", path, self.tf, json={"page": 2}).status_code, 422)
+        from learningx.live_slides import prepare_live_pages
+        pages = json.loads((parsed / "document.json").read_text())["pages"]
+        self.assertEqual(prepare_live_pages(folder, folder / "source.pdf", pages), 3)
+        self.assertFalse((parsed / "live-pages/2.pdf").exists())
+        self.assertTrue((parsed / "live-pages/3.pdf").is_file())
         initial = self.req("GET", path, student).json()
         self.assertEqual(initial["slide"]["page"], 1)
         self.assertEqual(initial["slide"]["after"], 3)
@@ -161,13 +166,26 @@ class ClassroomTests(unittest.TestCase):
         next_pdf = self.req("GET", prefetch, student, params={"page": 3})
         with pymupdf.open(stream=next_pdf.content, filetype="pdf") as pdf:
             self.assertEqual(pdf[0].get_text().strip(), "Next slide text")
-        batch = {"pages": [3, 1, 3], "batch_id": "6e2f3169-9826-42cd-82ec-fb3748478933"}
-        for _ in range(2):
-            self.assertEqual(self.req("PUT", path, self.tf, json=batch).status_code, 200)
+        batch = {"pages": [3, 1, 3], "batch_id": "6e2f3169-9826-42cd-82ec-fb3748478933",
+                 "expected_version": initial["slide"]["version"]}
+        first_publish = self.req("PUT", path, self.tf, json=batch)
+        self.assertEqual(first_publish.status_code, 200)
+        self.assertIn("write;dur=", first_publish.headers["server-timing"])
+        retry = self.req("PUT", path, self.tf, json=batch)
+        self.assertEqual(retry.json(), first_publish.json())
+        self.assertEqual(first_publish.json()["sequence"], 4)
+        self.assertEqual(self.req("PUT", path, self.tf, json={
+            "page": 4, "expected_version": initial["slide"]["version"]
+        }).status_code, 409)
+        current = self.req("GET", path, student, params={"version": first_publish.json()["version"]})
+        self.assertIn("snapshot;dur=", current.headers["server-timing"])
+        self.assertEqual(current.json()["slide"]["sequence"], 4)
         ordered = self.req("GET", path, student, params={"cursor": initial["slide"]["version"]}).json()["transitions"]
         self.assertEqual([item["page"] for item in ordered], [3, 1, 3])
         old_page = path + "/page/" + ordered[0]["version"]
-        self.assertEqual(self.req("GET", old_page, student).status_code, 200)
+        historical = self.req("GET", old_page, student)
+        self.assertEqual(historical.status_code, 200)
+        self.assertIn("pdf;dur=", historical.headers["server-timing"])
         self.assertEqual(self.req("GET", old_page, student, params={"page": 4}).status_code, 403)
         before = initial["revision"]
         self.assertEqual(self.req("PUT", path, self.tf, json={"page": 1}).status_code, 200)
@@ -182,6 +200,20 @@ class ClassroomTests(unittest.TestCase):
             self.assertEqual(len(pdf), 1)
             self.assertEqual(pdf[0].get_text().strip(), "Visible slide text")
         self.assertEqual(self.req("GET", path + "/page/stale", student).status_code, 409)
+
+        original_snapshot = classroom.build_snapshot
+
+        def close_before_publish(material, page_number):
+            self.assertEqual(self.req("PUT", path.removesuffix("/live") + "/state", self.tf,
+                                      json={"status": "CLOSED"}).status_code, 200)
+            return original_snapshot(material, page_number)
+
+        with patch.object(classroom, "build_snapshot", side_effect=close_before_publish) as build:
+            self.assertEqual(self.req("PUT", path, self.tf, json={"page": 3}).status_code, 409)
+        build.assert_called_once()
+        self.assertIsNone(self.req("GET", path, student).json()["slide"])
+        self.assertEqual(self.req("GET", page, student).status_code, 409)
+
 
     def test_pptx_session_requires_worker_preview_and_serves_it(self):
         import pymupdf
@@ -213,6 +245,30 @@ class ClassroomTests(unittest.TestCase):
         document = self.req("GET", path + "/document", self.tf)
         with pymupdf.open(stream=document.content, filetype="pdf") as pdf:
             self.assertEqual(pdf[0].get_text().strip(), "Worker preview slide 1")
+
+    def test_live_poll_revalidates_student_after_wait(self):
+        course = f"/v1/courses/{self.course_id}"
+        self.req("PUT", course + "/policy", self.tf,
+                 json={"policy": "RESTRICTED_HINT_ONLY", "teacher_approved": True})
+        with patch.object(nit, "verified_count", return_value=1):
+            opened = self.req("POST", course + "/sessions", self.tf,
+                              json={"material_id": self.material_id}).json()
+        student = self.req("POST", "/v1/join", json={"code": opened["join_code"]}).json()["access_token"]
+        path = f"/v1/sessions/{opened['id']}/live"
+        stamp = self.req("GET", path, student).json()["revision"]
+
+        async def deactivate_during_wait(session_id, _stamp):
+            with SessionLocal() as db:
+                participant = db.query(classroom.SessionParticipant).filter_by(session_id=session_id).one()
+                db.get(User, participant.user_id).active = False
+                db.commit()
+
+        with patch.object(classroom, "wait_for_update", side_effect=deactivate_during_wait) as wait:
+            response = self.req("GET", path, student, params={"after": stamp})
+        wait.assert_awaited_once()
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(self.req("GET", path, student).status_code, 401)
+
 
     def test_full_flow(self):
         cid, mid = self.course_id, self.material_id

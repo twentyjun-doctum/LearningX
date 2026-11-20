@@ -25,7 +25,8 @@ app=FastAPI(title="LearningX NIT Backend",version="0.1.0",docs_url=None,redoc_ur
 origins=[x.strip() for x in os.getenv("NIT_CORS_ORIGINS","").split(",") if x.strip()]
 if origins:
     app.add_middleware(CORSMiddleware,allow_origins=origins,allow_credentials=False,
-        allow_methods=["GET","POST","PUT"],allow_headers=["Authorization","Content-Type"])
+        allow_methods=["GET","POST","PUT"],allow_headers=["Authorization","Content-Type"],
+        expose_headers=["Server-Timing"])
 
 @app.on_event("startup")
 def bootstrap():

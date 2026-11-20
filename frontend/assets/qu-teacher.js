@@ -3,7 +3,7 @@
    토큰은 메모리에만 둡니다. 새로고침하면 현재 체험 수업 관리 세션이 종료됩니다. */
 (() => {
   'use strict';
-  const { el, client, LEVEL, relTime, liveMark } = window.QU;
+  const { el, client, LEVEL, relTime, liveMark, liveTimingEnabled } = window.QU;
   const $ = (id) => document.getElementById(id);
 
   const MAX_APPROVAL_ITEMS = 1000;
@@ -499,7 +499,11 @@
         live.requestedPage = undefined;
         const batchId = crypto.randomUUID();
         const version = batchId + ':0';
-        const options = {method: 'PUT', body: {page: next, batch_id: batchId}, timeout: 8000};
+        let serverTiming;
+        const options = {
+          method: 'PUT', body: {page: next, batch_id: batchId, expected_version: view.confirmedVersion()}, timeout: 8000,
+          onResponse: liveTimingEnabled ? response => { serverTiming = response.headers.get('Server-Timing'); } : undefined,
+        };
         liveMark?.('teacher-action', version, next, live.requestedAt);
         liveMark?.('publish-start', version, next);
         try {
@@ -509,7 +513,7 @@
                 live.requestedPage === undefined) return api(url, options);
             throw err;
           });
-          liveMark?.('publish-response', version, next);
+          liveMark?.('publish-response', version, next, undefined, serverTiming);
           view.acknowledge(result);
           setError($('global-error'), null);
         } catch (err) {

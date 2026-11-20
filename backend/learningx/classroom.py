@@ -22,19 +22,21 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update
-from .security import actor, issue_token, require_course, session
-from .storage import Audit, Base, Course, Material, Member, Question, Revision, User, uid
+from .live_timing import LiveTimingRoute, record_phase
+from .security import actor, issue_token, require_course, scheme, session
+from .storage import Audit, Base, Course, Material, Member, Question, Revision, SessionLocal, User, uid
 
-router = APIRouter(prefix="/v1")
+router = APIRouter(prefix="/v1", route_class=LiveTimingRoute)
 
 JOIN_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # no 0/O, 1/I
 JOIN_LENGTH = 6
@@ -127,6 +129,7 @@ class JoinRequest(BaseModel):
 class ShareSlide(BaseModel):
     page: int | None = Field(default=None, ge=1)
     pages: list[Annotated[int, Field(ge=1)]] | None = Field(default=None, min_length=1, max_length=16)
+    expected_version: str | None = Field(default=None, max_length=64)
     batch_id: str | None = Field(default=None, pattern=r"^[0-9a-f-]{36}$")
 
     @model_validator(mode="after")
@@ -350,6 +353,7 @@ def get_session(session_id: str, db: Session = Depends(session), user: User = De
 @router.put("/sessions/{session_id}/state")
 def set_state(session_id: str, data: SessionState, db: Session = Depends(session), user: User = Depends(actor)):
     s = _faculty_session(db, session_id, user)
+    db.refresh(s, with_for_update=True)
     if s.status == "CLOSED":
         raise HTTPException(409, "Session already closed")
     s.status = data.status
@@ -361,17 +365,36 @@ def set_state(session_id: str, data: SessionState, db: Session = Depends(session
     return _public_session(db, s, faculty=True)
 
 
+def _read_live(request, credentials, session_id, version, cursor, queued, *, access_only=False):
+    # Keep checkout, authorization and release on one worker. A parked poll must
+    # not hold a connection while it queues for a worker to build its response.
+    record_phase(request, "worker_queue", queued)
+    started = time.perf_counter()
+    with SessionLocal() as db:
+        user = actor(request, credentials, db)
+        record_phase(request, "auth", started)
+        started = time.perf_counter()
+        if access_only:
+            _live_access(db, session_id, user)
+            record_phase(request, "access", started)
+            return
+        result = _snapshot(db, session_id, user, version, cursor)
+        record_phase(request, "snapshot", started)
+        return result
+
+
 @router.get("/sessions/{session_id}/live")
-async def live_snapshot(session_id: str, response: Response, version: str = "",
+async def live_snapshot(session_id: str, request: Request, response: Response, version: str = "",
                         after: str | None = None, index_version: str = "", cursor: str | None = None,
-                        db: Session = Depends(session), user: User = Depends(actor)):
+                        credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     if after is not None and after == revision(session_id) and (cursor is None or cursor == version):
-        await run_in_threadpool(_live_access, db, session_id, user)
-        await run_in_threadpool(db.rollback)
+        await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor, time.perf_counter(), access_only=True)
+        started = time.perf_counter()
         await wait_for_update(session_id, after)
+        record_phase(request, "poll_wait", started)
     stamp = revision(session_id)
+    snapshot = await run_in_threadpool(_read_live, request, credentials, session_id, version, cursor, time.perf_counter())
     response.headers["Cache-Control"] = "no-store"
-    snapshot = await run_in_threadpool(_snapshot, db, session_id, user, version, cursor)
     index_stamp = hashlib.sha256(json.dumps(snapshot["index"], ensure_ascii=False).encode()).hexdigest()
     if index_version == index_stamp:
         del snapshot["index"]
@@ -383,7 +406,10 @@ def _live_access(db, session_id, user):
     member = db.query(Member).filter_by(course_id=current.course_id, user_id=user.id).first()
     faculty = member is not None and member.role == "faculty"
     if not faculty:
-        _participant_session(db, session_id, user)
+        if not member or (member.role != "student" and user.role != "admin"):
+            raise HTTPException(403, "Course access denied")
+        if not db.query(SessionParticipant).filter_by(session_id=session_id, user_id=user.id).first():
+            raise HTTPException(403, "Not a participant of this session")
     return current, faculty
 
 
@@ -391,8 +417,11 @@ def _slide_metadata(slide, version=""):
     if slide is None:
         return None
     metadata = {"page": slide.page, "total": slide.total, "version": slide.version}
+    content = json.loads(slide.content)
     if version != slide.version:
-        metadata.update(json.loads(slide.content))
+        metadata.update(content)
+    elif "sequence" in content:
+        metadata["sequence"] = content["sequence"]
     return metadata
 
 
@@ -400,7 +429,7 @@ def _snapshot(db, session_id, user, version, cursor=None):
     current, faculty = _live_access(db, session_id, user)
     if current.status == "CLOSED":
         return {"status": current.status, "slide": None, "index": []}
-    slide = db.get(LiveSlide, session_id)
+    slide = db.get(LiveSlide, session_id, options=[undefer(LiveSlide.content)])
     query = db.query(SessionQuestion.id, SessionQuestion.level, QuestionSlide.page,
                      SessionQuestion.latest_text, QuestionAnchor.location).join(
         QuestionSlide, QuestionSlide.question_id == SessionQuestion.id
@@ -473,9 +502,10 @@ def live_document(session_id: str, db: Session = Depends(session), user: User = 
 
 
 @router.get("/sessions/{session_id}/live/page/{version}")
-def live_page(session_id: str, version: str, page: int | None = None, db: Session = Depends(session), user: User = Depends(actor)):
+def live_page(session_id: str, version: str, request: Request, page: int | None = None, db: Session = Depends(session), user: User = Depends(actor)):
+    started = time.perf_counter()
     current, _ = _live_access(db, session_id, user)
-    slide = db.get(LiveSlide, session_id)
+    slide = db.get(LiveSlide, session_id, options=[undefer(LiveSlide.content)])
     if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
     historical = slide.version != version
@@ -491,7 +521,13 @@ def live_page(session_id: str, version: str, page: int | None = None, db: Sessio
     allowed = (slide.page,) if historical else (slide.page, content.get("before"), content.get("after"))
     if target not in allowed:
         raise HTTPException(403, "This page is outside the active slide window")
-    return _pdf_response(page_pdf(material, target))
+    db.expunge(material)
+    db.rollback()
+    record_phase(request, "lookup", started)
+    started = time.perf_counter()
+    content = page_pdf(material, target)
+    record_phase(request, "pdf", started)
+    return _pdf_response(content)
 
 
 def _pdf_response(content):
@@ -501,12 +537,23 @@ def _pdf_response(content):
 
 
 @router.put("/sessions/{session_id}/live")
-def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session), user: User = Depends(actor)):
+def share_slide(session_id: str, data: ShareSlide, request: Request,
+                db: Session = Depends(session), user: User = Depends(actor),
+                credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
+    started = time.perf_counter()
     current = _faculty_session(db, session_id, user)
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     material = db.get(Material, current.material_id)
+    db.expunge(material)
+    db.rollback()
+    record_phase(request, "lookup", started)
+    started = time.perf_counter()
     snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
+    record_phase(request, "prepare", started)
+    started = time.perf_counter()
+    user = actor(request, credentials, db)
+    current = _faculty_session(db, session_id, user)
     # Serialize presenters sharing the same classroom.
     db.refresh(current, with_for_update=True)
     if current.status == "CLOSED":
@@ -518,23 +565,29 @@ def share_slide(session_id: str, data: ShareSlide, db: Session = Depends(session
         if [item.page for item in previous] != [page for page, _, _ in snapshots]:
             raise HTTPException(409, "Batch identifier already used")
         last = previous[-1]
-        return {"page": last.page, "total": last.total, **json.loads(last.content)}
+        record_phase(request, "write", started)
+        return {"page": last.page, "total": last.total, "version": last.version,
+                **json.loads(last.content), "sequence": last.position}
+    initial = db.get(LiveSlide, session_id)
+    if data.expected_version is not None and (initial is None or initial.version != data.expected_version):
+        raise HTTPException(409, "The shared page changed. Refresh before publishing again.")
     position = history.with_entities(func.max(LiveTransition.position)).scalar() or 0
-    if position == 0:
-        initial = db.get(LiveSlide, session_id)
-        if initial:
-            position = 1
-            db.add(LiveTransition(session_id=session_id, position=position, version=initial.version,
-                                  page=initial.page, total=initial.total, content=initial.content))
+    if position == 0 and initial:
+        position = 1
+        db.add(LiveTransition(session_id=session_id, position=position, version=initial.version,
+                              page=initial.page, total=initial.total, content=initial.content))
     for offset, (page, total, content) in enumerate(snapshots):
         version = f"{batch_id}:{offset}"
+        sequence = position + offset + 1
+        content = {**content, "sequence": sequence}
         encoded = json.dumps(content, ensure_ascii=False)
-        db.add(LiveTransition(session_id=session_id, position=position + offset + 1,
+        db.add(LiveTransition(session_id=session_id, position=sequence,
                               page=page, total=total, version=version, content=encoded))
     db.merge(LiveSlide(session_id=session_id, page=page, total=total, version=version, content=encoded))
     db.commit()
+    record_phase(request, "write", started)
     notify(session_id)
-    return {"page": page, "total": total, **content}
+    return {"page": page, "total": total, "version": version, **content}
 
 
 @router.get("/sessions/{session_id}/board")

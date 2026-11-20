@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
-from .private_store import PDF_UPLOAD_LIMIT, PPTX_UPLOAD_LIMIT, has_material_artifact, read_material_artifact
+from .private_store import MAX_FILES, MAX_TOTAL_BYTES, PDF_UPLOAD_LIMIT, PPTX_UPLOAD_LIMIT, has_material_artifact, read_material_artifact
 from .storage import uid
 from .storage import Base
 
@@ -45,6 +45,12 @@ class QuestionSlide(Base):
 _revisions = OrderedDict()
 _revision_lock = Lock()
 _pdf_lock = Lock()
+_page_load_locks = tuple(Lock() for _ in range(16))
+_page_cache_lock = Lock()
+_page_cache = OrderedDict()
+_page_cache_bytes = 0
+_PAGE_CACHE_MAX_BYTES = 24 * 1024 * 1024
+_PAGE_CACHE_MAX_PAGES = 12
 _waiters = {}
 
 
@@ -132,17 +138,94 @@ def build_snapshot(material, page):
                         "after": min((n for n in pages if n > page and not pages[n]), default=None)}
 
 
-@lru_cache(maxsize=6)
-def _page_pdf(identity, page):
+def _page_artifact(page):
+    return f"parsed/live-pages/{page}.pdf"
+
+
+def _split_pdf(original, page):
     import pymupdf
 
-    source = _source(identity)
-    with _pdf_lock, pymupdf.open(stream=source, filetype="pdf") as original, pymupdf.open() as result:
-        if page > len(original):
-            raise HTTPException(404, "PDF page unavailable")
+    with pymupdf.open() as result:
         result.insert_pdf(original, from_page=page - 1, to_page=page - 1,
                           links=False, annots=False, widgets=False)
         return result.tobytes(garbage=4, deflate=True)
+
+
+def prepare_live_pages(root, source, pages):
+    """Prepare a bounded subset; uncached pages remain available on demand."""
+    import pymupdf
+
+    existing = [path for path in root.rglob("*") if path.is_file()]
+    remaining_files = min(48, MAX_FILES - len(existing) - 1)  # reserve a signed manifest entry
+    remaining_bytes = min(24 * 1024 * 1024, MAX_TOTAL_BYTES - sum(p.stat().st_size for p in existing))
+    if remaining_files <= 0 or remaining_bytes <= 0:
+        return 0
+    count = 0
+    with pymupdf.open(source) as original:
+        for entry in pages:
+            page = entry["page"]
+            if entry.get("hidden_slide") or not 1 <= page <= len(original):
+                continue
+            data = _split_pdf(original, page)
+            if len(data) > remaining_bytes:
+                break
+            target = root / _page_artifact(page)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+            count += 1
+            remaining_bytes -= len(data)
+            if count >= remaining_files or remaining_bytes <= 0:
+                break
+    return count
+
+
+def _cached_page(key):
+    with _page_cache_lock:
+        content = _page_cache.get(key)
+        if content is not None:
+            _page_cache.move_to_end(key)
+        return content
+
+
+def _page_pdf(identity, page):
+    global _page_cache_bytes
+    key = (identity, page)
+    content = _cached_page(key)
+    if content is not None:
+        return content
+
+    # Requests for the same page share one storage read or split.
+    with _page_load_locks[hash(key) % len(_page_load_locks)]:
+        content = _cached_page(key)
+        if content is not None:
+            return content
+        content = _load_page(identity, page)
+        if len(content) <= _PAGE_CACHE_MAX_BYTES:
+            with _page_cache_lock:
+                while (_page_cache_bytes + len(content) > _PAGE_CACHE_MAX_BYTES
+                       or len(_page_cache) >= _PAGE_CACHE_MAX_PAGES):
+                    _, evicted = _page_cache.popitem(last=False)
+                    _page_cache_bytes -= len(evicted)
+                _page_cache[key] = content
+                _page_cache_bytes += len(content)
+        return content
+
+
+def _load_page(identity, page):
+    import pymupdf
+
+    material_id, course_id, out_dir, _ = identity
+    record = SimpleNamespace(id=material_id, course_id=course_id, out_dir=out_dir)
+    try:
+        return read_material_artifact(record, _page_artifact(page), 24 * 1024 * 1024)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+    source = _source(identity)
+    with _pdf_lock, pymupdf.open(stream=source, filetype="pdf") as original:
+        if not 1 <= page <= len(original):
+            raise HTTPException(404, "PDF page unavailable")
+        return _split_pdf(original, page)
 
 
 def page_pdf(material, page):

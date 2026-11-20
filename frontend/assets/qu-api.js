@@ -42,7 +42,7 @@
 
   function client(getToken, onUnauthorized) {
     const base = apiBase();
-    return async function request(path, { method = 'GET', body, raw = false, readBody, timeout = 60000 } = {}) {
+    return async function request(path, { method = 'GET', body, raw = false, readBody, onResponse, timeout = 60000 } = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
       try {
@@ -66,6 +66,7 @@
           if (response.status === 401 && onUnauthorized) onUnauthorized();
           throw new ApiError(response.status, detail);
         }
+        onResponse?.(response);
         if (readBody) {
           try {
             return await readBody(response);
@@ -109,13 +110,13 @@
   }
 
   const traceEnabled = new URLSearchParams(location.search).get('liveTiming') === '1';
-  function liveMark(stage, version, page, startTime = performance.now()) {
+  function liveMark(stage, version, page, startTime = performance.now(), serverTiming) {
     if (!traceEnabled || !version) return;
     performance.mark('question-up:' + stage, {
       startTime,
-      detail: {version, page, epochMs: performance.timeOrigin + startTime},
+      detail: {version, page, epochMs: performance.timeOrigin + startTime, ...(serverTiming ? {serverTiming} : {})},
     });
   }
 
-  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime, liveMark };
+  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime, liveMark, liveTimingEnabled: traceEnabled };
 })();
