@@ -565,15 +565,37 @@ def _pdf_response(content):
                              "Content-Disposition": 'attachment; filename="lesson.pdf"'})
 
 
+def _publisher(db, credentials, session_id, current=None):
+    claims = decode_token(credentials)
+    query = select(User, Member.role).select_from(User).where(User.id == claims["sub"])
+    if current is None:
+        query = (query.add_columns(ClassSession, Material)
+                 .outerjoin(ClassSession, ClassSession.id == session_id)
+                 .outerjoin(Member, (Member.course_id == ClassSession.course_id) & (Member.user_id == User.id))
+                 .outerjoin(Material, Material.id == ClassSession.material_id))
+    else:
+        query = query.outerjoin(Member, (Member.course_id == current.course_id) & (Member.user_id == User.id))
+    row = db.execute(query).one_or_none()
+    if row is None or not row[0].active:
+        raise HTTPException(401, "Inactive or unknown user")
+    user, member_role, *session_material = row
+    if claims.get("scope") is not None or user.email.endswith("@join.question-up.local"):
+        raise HTTPException(403, "Session token cannot access this endpoint")
+    if session_material and session_material[0] is None:
+        raise HTTPException(404, "Session not found")
+    if member_role is None or (member_role != "faculty" and user.role != "admin"):
+        raise HTTPException(403, "Course access denied")
+    return session_material
+
+
 @router.put("/sessions/{session_id}/live")
 def share_slide(session_id: str, data: ShareSlide, request: Request,
-                db: Session = Depends(session), user: User = Depends(actor),
+                db: Session = Depends(session),
                 credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     started = time.perf_counter()
-    current = _faculty_session(db, session_id, user)
+    current, material = _publisher(db, credentials, session_id)
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
-    material = db.get(Material, current.material_id)
     db.expunge(material)
     db.rollback()
     record_phase(request, "lookup", started)
@@ -581,12 +603,11 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
     snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
     record_phase(request, "prepare", started)
     started = time.perf_counter()
-    user = actor(request, credentials, db)
     # Lock the current row before rechecking course membership and state.
     current = db.get(ClassSession, session_id, with_for_update=True)
     if current is None:
         raise HTTPException(404, "Session not found")
-    require_course(db, current.course_id, user, "faculty")
+    _publisher(db, credentials, session_id, current)
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     history = db.query(LiveTransition).filter_by(session_id=session_id)
@@ -599,10 +620,17 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
         record_phase(request, "write", started)
         return {"page": last.page, "total": last.total, "version": last.version,
                 **json.loads(last.content), "sequence": last.position}
-    initial = db.get(LiveSlide, session_id)
+    last_position = history.with_entities(func.max(LiveTransition.position)).scalar_subquery()
+    latest = db.execute(select(LiveSlide, last_position).where(LiveSlide.session_id == session_id)
+                        .options(undefer(LiveSlide.content))).one_or_none()
+    if latest is None:
+        initial = None
+        position = history.with_entities(func.max(LiveTransition.position)).scalar() or 0
+    else:
+        initial, position = latest
+        position = position or 0
     if data.expected_version is not None and (initial is None or initial.version != data.expected_version):
         raise HTTPException(409, "The shared page changed. Refresh before publishing again.")
-    position = history.with_entities(func.max(LiveTransition.position)).scalar() or 0
     if position == 0 and initial:
         position = 1
         db.add(LiveTransition(session_id=session_id, position=position, version=initial.version,
