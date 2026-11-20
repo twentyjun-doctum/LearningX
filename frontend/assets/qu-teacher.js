@@ -348,6 +348,28 @@
   });
 
   /* ---------- 4 · 검토·승인 ---------- */
+  function clearConsentError() {
+    setError($('ai-consent-error'), null);
+    $('prepare-consent').classList.remove('consent-required');
+    $('ai-consent').removeAttribute('aria-invalid');
+    $('ai-consent').removeAttribute('aria-describedby');
+  }
+
+  $('ai-consent').addEventListener('change', clearConsentError);
+
+  function showConsentError() {
+    const card = $('prepare-consent');
+    const checkbox = $('ai-consent');
+    setError($('ai-consent-error'), 'AI 질문 코칭 사용에 동의해야 수업을 시작할 수 있습니다.');
+    checkbox.setAttribute('aria-invalid', 'true');
+    checkbox.setAttribute('aria-describedby', 'ai-consent-error');
+    card.classList.remove('consent-required');
+    void card.offsetWidth;
+    card.classList.add('consent-required');
+    checkbox.focus({preventScroll: true});
+    card.scrollIntoView({block: 'nearest'});
+  }
+
   async function renderPrepare(courseId, materialId) {
     if (!state.courses.length) await loadCourses();
     const course = state.courses.find((c) => c.id === courseId);
@@ -355,6 +377,7 @@
     const material = (course.materials || []).find((m) => m.id === materialId) || { id: materialId, filename: '' };
     header({ crumb: course.title, step: 2, back: true });
     screen('prepare');
+    clearConsentError();
     setError($('prepare-error'), null);
     const list = $('candidate-list');
     list.replaceChildren(el('div', { class: 'candidate' }, el('div', { class: 'progress indeterminate grow' }, el('span'))));
@@ -414,10 +437,11 @@
   $('approve-start').addEventListener('click', async () => {
     const p = state.prepare;
     const btn = $('approve-start');
+    if (!p) return;
     setError($('prepare-error'), null);
     const items = selectedItems();
     if (items.length > MAX_APPROVAL_ITEMS) return setError($('prepare-error'), '한 번에 최대 1,000개까지 승인할 수 있습니다.');
-    if (!$('ai-consent').checked) return setError($('prepare-error'), 'AI 질문 코칭 사용에 동의해야 수업을 시작할 수 있습니다.');
+    if (!$('ai-consent').checked) return showConsentError();
     if (items.length && p.isPptx && !$('media-ack').checked) return setError($('prepare-error'), '분석되지 않은 오디오·도표 안내를 확인해 주세요.');
     busy(btn, true, '시작하는 중…');
     try {

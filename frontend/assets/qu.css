@@ -117,6 +117,16 @@ button,input,textarea,select{font:inherit;color:inherit}
 .list>.head{background:#F7FAF8;padding:12px 24px;font-size:13px;color:var(--text-sub);font-weight:500}
 .prepare-list-note {padding:12px 20px 16px; line-height:1.65;}
 .prepare-consent {position:sticky; top:64px; z-index:6; box-shadow:var(--shadow-xs);}
+.prepare-consent-error {margin:8px 0 0 26px;}
+.prepare-consent.consent-required {
+  background:#fff5f4;
+  border-color:var(--danger);
+  animation:consent-highlight 850ms ease-out;
+}
+@keyframes consent-highlight {
+  from {box-shadow:0 0 0 4px #b4231830; background:#ffe3df;}
+  to {box-shadow:var(--shadow-xs); background:#fff5f4;}
+}
 .candidate{display:flex;gap:14px;align-items:flex-start;padding:14px 20px;border-bottom:1px solid var(--border);cursor:pointer}
 .candidate:last-child{border-bottom:0}
 .candidate input{width:18px;height:18px;margin-top:3px;accent-color:var(--primary);flex:none}
