@@ -5,14 +5,16 @@ import os
 from pathlib import Path
 import shutil
 import tempfile
+import threading
 from contextlib import ExitStack
 from typing import Literal
+import anyio
 from fastapi import FastAPI, Depends, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 from sqlalchemy import text as sql_text
-from .storage import init_db, User, Course, Member, Material, Audit, Question, Revision
+from .storage import init_db, warm_live_pools, User, Course, Member, Material, Audit, Question, Revision
 from .security import actor, session, require_course, secret, issue_token
 from . import engine_adapter as nit
 from . import private_store
@@ -36,6 +38,13 @@ def bootstrap():
     if (os.getenv("RENDER_SERVICE_ID") or os.getenv("NIT_SERVERLESS_RUNTIME") == "1") and not os.getenv("DATABASE_URL"):
         raise RuntimeError("DATABASE_URL must be configured on the backend host")
     init_db()
+    threading.Thread(target=warm_live_pools, daemon=True).start()
+
+
+@app.on_event("startup")
+async def widen_thread_pool():
+    # A class waking at once must not queue behind the 40-thread default.
+    anyio.to_thread.current_default_thread_limiter().total_tokens = int(os.getenv("API_THREADS", "100"))
 
 class CourseCreate(BaseModel):
     title:str=Field(min_length=2,max_length=180)

@@ -25,16 +25,17 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
 from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
 from . import engine_adapter as nit
 from . import private_store
 from .guest import is_guest
-from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
+from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, prepare_shared_page, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
 from .security import actor, decode_token, issue_token, require_course, scheme, session
-from .storage import Audit, Base, Course, Material, Member, Question, Revision, SessionLocal, User, uid
+from .storage import Audit, Base, Course, Material, Member, Question, Revision, LiveReadSession, PublishSession, SessionLocal, User, publish_engine, uid
 
 router = APIRouter(prefix="/v1", route_class=LiveTimingRoute)
 
@@ -413,8 +414,15 @@ def _read_live(request, credentials, session_id, version, cursor, queued, *, acc
     # not hold a connection while it queues for a worker to build its response.
     record_phase(request, "worker_queue", queued)
     started = time.perf_counter()
-    with SessionLocal() as db:
-        user, current, faculty, *page_data = _live_reader(db, credentials, session_id, include_page=inline_page)
+    with LiveReadSession() as db:
+        try:
+            user, current, faculty, *page_data = _live_reader(db, credentials, session_id, include_page=inline_page)
+        except DBAPIError as exc:
+            # Delivery pools are not pre-pinged; replace a connection the server closed.
+            if not exc.connection_invalidated:
+                raise
+            db.close()
+            user, current, faculty, *page_data = _live_reader(db, credentials, session_id, include_page=inline_page)
         record_phase(request, "auth", started)
         started = time.perf_counter()
         if access_only:
@@ -617,11 +625,123 @@ def _publisher(db, credentials, session_id, current=None):
     return session_material
 
 
+def _await_page(prepared):
+    try:
+        prepared.result(timeout=1.5)
+    except Exception:
+        pass  # Never hold the notification on a slow storage read.
+
+
+_PUBLISH_LOCK = "select id from class_sessions where id = %s for update"
+_PUBLISH_READ = """
+select cs.status, u.active, u.email, u.role, m.role, ls.page, ls.total, ls.version, ls.content,
+       (select max(t.position) from live_transitions t where t.session_id = cs.id),
+       (select count(*) from live_transitions t
+         where t.session_id = cs.id and left(t.version, length(%s)) = %s)
+from class_sessions cs
+join users u on u.id = %s
+left join members m on m.course_id = cs.course_id and m.user_id = u.id
+left join live_slides ls on ls.session_id = cs.id
+where cs.id = %s"""
+_TRANSITION_INSERT = ("insert into live_transitions (session_id, position, version, page, total, content) "
+                      "values (%s, %s, %s, %s, %s, %s)")
+
+
+def _publish_pipelined(session_id, claims, batch_id, snapshots, expected_version):
+    """PostgreSQL publish in two round trips: lock+read, then write+commit.
+
+    Same checks, ordering and lock as the ORM path below; the lock statement is
+    queued before the read so the read's snapshot follows any earlier publisher.
+    """
+    import psycopg
+
+    for attempt in (0, 1):
+        raw = publish_engine.raw_connection()
+        conn = raw.driver_connection
+        sent_writes = False
+        try:
+            # Explicit BEGIN/COMMIT on an autocommit connection: psycopg otherwise
+            # waits for its implicit BEGIN, adding a round trip.
+            conn.autocommit = True
+            with conn.pipeline() as pipe:
+                prefix = batch_id + ":"
+                conn.execute("begin")
+                lock = conn.execute(_PUBLISH_LOCK, (session_id,))
+                read = conn.execute(_PUBLISH_READ, (prefix, prefix, claims["sub"], session_id))
+                pipe.sync()
+                if lock.fetchone() is None:
+                    raise HTTPException(404, "Session not found")
+                row = read.fetchone()
+                result = _publish_checks(conn, session_id, claims, batch_id, snapshots, expected_version, row)
+                if result is not None:
+                    conn.execute("rollback")
+                    return result, False
+                (status, _, _, _, _, page0, total0, version0, content0, position, _) = row
+                position = position or 0
+                if position == 0 and version0 is not None:
+                    position = 1
+                    conn.execute(_TRANSITION_INSERT, (session_id, 1, version0, page0, total0, content0))
+                for offset, (page, total, content) in enumerate(snapshots):
+                    version = f"{batch_id}:{offset}"
+                    content = {**content, "sequence": position + offset + 1}
+                    encoded = json.dumps(content, ensure_ascii=False)
+                    conn.execute(_TRANSITION_INSERT, (session_id, position + offset + 1, version, page, total, encoded))
+                if version0 is None:
+                    conn.execute("insert into live_slides (session_id, page, total, version, content) "
+                                 "values (%s, %s, %s, %s, %s)", (session_id, page, total, version, encoded))
+                else:
+                    conn.execute("update live_slides set page = %s, total = %s, version = %s, content = %s "
+                                 "where session_id = %s", (page, total, version, encoded, session_id))
+                sent_writes = True
+                conn.execute("commit")
+            return {"page": page, "total": total, "version": version, **content}, True
+        except psycopg.OperationalError:
+            # A pooled connection the server dropped fails before any write is sent.
+            raw.invalidate()
+            if attempt or sent_writes:
+                raise
+        except BaseException:
+            if not conn.closed and conn.info.transaction_status != psycopg.pq.TransactionStatus.IDLE:
+                conn.execute("rollback")
+            raise
+        finally:
+            if not conn.closed:
+                conn.autocommit = False
+            raw.close()
+
+
+def _publish_checks(conn, session_id, claims, batch_id, snapshots, expected_version, row):
+    if row is None:
+        raise HTTPException(401, "Inactive or unknown user")
+    status, active, email, user_role, member_role, _, _, version0, _, _, replayed = row
+    if not active:
+        raise HTTPException(401, "Inactive or unknown user")
+    if claims.get("scope") is not None or email.endswith("@join.question-up.local"):
+        raise HTTPException(403, "Session token cannot access this endpoint")
+    if member_role is None or (member_role != "faculty" and user_role != "admin"):
+        raise HTTPException(403, "Course access denied")
+    if status == "CLOSED":
+        raise HTTPException(409, "Class has ended")
+    if replayed:
+        prefix = batch_id + ":"
+        previous = conn.execute(
+            "select position, version, page, total, content from live_transitions "
+            "where session_id = %s and left(version, length(%s)) = %s order by position",
+            (session_id, prefix, prefix)).fetchall()
+        if [item[2] for item in previous] != [page for page, _, _ in snapshots]:
+            raise HTTPException(409, "Batch identifier already used")
+        position, version, page, total, content = previous[-1]
+        return {"page": page, "total": total, "version": version, **json.loads(content), "sequence": position}
+    if expected_version is not None and (version0 is None or version0 != expected_version):
+        raise HTTPException(409, "The shared page changed. Refresh before publishing again.")
+    return None
+
+
 @router.put("/sessions/{session_id}/live")
 def share_slide(session_id: str, data: ShareSlide, request: Request,
                 credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     started = time.perf_counter()
-    with SessionLocal() as db:
+    with LiveReadSession() as db:
         current, material = _publisher(db, credentials, session_id)
         if current.status == "CLOSED":
             raise HTTPException(409, "Class has ended")
@@ -630,10 +750,20 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
     started = time.perf_counter()
     snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
     record_phase(request, "prepare", started)
+    last_page, _, last_content = snapshots[-1]
+    # Students fetch the page bytes from memory the moment they are notified.
+    prepared = prepare_shared_page(material, last_page, last_content.get("before"), last_content.get("after"))
     started = time.perf_counter()
     batch_id = data.batch_id or uid()
-    with SessionLocal() as db:
-        claims = decode_token(credentials)
+    claims = decode_token(credentials)
+    if publish_engine.dialect.name == "postgresql":
+        result, wrote = _publish_pipelined(session_id, claims, batch_id, snapshots, data.expected_version)
+        record_phase(request, "write", started)
+        if wrote:
+            _await_page(prepared)
+            notify(session_id)
+        return result
+    with PublishSession() as db:
         transitions = select(LiveTransition).where(LiveTransition.session_id == ClassSession.id)
         last_position = transitions.with_only_columns(func.max(LiveTransition.position)).scalar_subquery()
         replayed = transitions.with_only_columns(func.count()).where(
@@ -694,6 +824,7 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
             initial.page, initial.total, initial.version, initial.content = page, total, version, encoded
         db.commit()
     record_phase(request, "write", started)
+    _await_page(prepared)
     notify(session_id)
     return {"page": page, "total": total, "version": version, **content}
 

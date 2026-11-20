@@ -1,6 +1,7 @@
 """Page snapshots for live classrooms. Keep page assets separate from navigation state."""
 import asyncio
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from threading import Lock
 from types import SimpleNamespace
@@ -246,6 +247,29 @@ def warm_live_pages(material, pages):
                 return
     finally:
         _warm_lock.release()
+
+
+_prepare_pool = ThreadPoolExecutor(4, thread_name_prefix="live-page")
+
+
+def prepare_shared_page(material, page, before, after):
+    """Load the published page alongside the database write; warm its neighbours after."""
+    def load():
+        try:
+            page_pdf(material, page)
+        except Exception:
+            pass  # The student's page request reports the storage error.
+        for neighbour in (after, before):
+            if neighbour is not None:
+                _prepare_pool.submit(lambda n=neighbour: _quiet(page_pdf, material, n))
+    return _prepare_pool.submit(load)
+
+
+def _quiet(function, *args):
+    try:
+        function(*args)
+    except Exception:
+        pass
 
 
 def cached_live_page(material, page):

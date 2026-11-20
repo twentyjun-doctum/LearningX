@@ -105,8 +105,55 @@ if DB_URL.startswith("postgres://"):
     DB_URL = "postgresql+psycopg://" + DB_URL[len("postgres://"):]
 elif DB_URL.startswith("postgresql://"):
     DB_URL = "postgresql+psycopg://" + DB_URL[len("postgresql://"):]
-engine = create_engine(DB_URL, pool_pre_ping=True, connect_args={"check_same_thread":False} if DB_URL.startswith("sqlite:") else {})
+_SQLITE = DB_URL.startswith("sqlite:")
+_CONNECT = {"check_same_thread": False} if _SQLITE else {}
+engine = create_engine(DB_URL, pool_pre_ping=True, connect_args=_CONNECT)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
+
+
+def _live_engine(size, overflow, **options):
+    # Slide delivery lanes. Every database round trip is on the teacher-to-student
+    # critical path: no pre-ping query, and no periodic recycling, because a new
+    # connection costs about ten round trips. Dead connections are retried by the
+    # caller. Separate pools keep a classroom's poll burst from queueing the
+    # teacher's publish.
+    if not _SQLITE:
+        options.update(pool_pre_ping=False, pool_recycle=int(os.getenv("LIVE_POOL_RECYCLE", "-1")),
+                       pool_size=size, max_overflow=overflow)
+    return create_engine(DB_URL, connect_args=_CONNECT, **options)
+
+
+# Read-only access checks: autocommit avoids BEGIN and ROLLBACK round trips. Size
+# the pool for a whole class waking at once; overflow connections are discarded.
+live_read_engine = _live_engine(int(os.getenv("LIVE_READ_POOL", "40")), 10, isolation_level="AUTOCOMMIT")
+LiveReadSession = sessionmaker(bind=live_read_engine, expire_on_commit=False)
+publish_engine = _live_engine(3, 3)
+PublishSession = sessionmaker(bind=publish_engine, expire_on_commit=False)
+
+
+def warm_live_pools():
+    """Open the delivery pools before the first class instead of during a page change."""
+    if _SQLITE:
+        return
+    from concurrent.futures import ThreadPoolExecutor
+
+    targets = [live_read_engine] * live_read_engine.pool.size() + [publish_engine] * publish_engine.pool.size()
+    # Hold every connection at once so each ping opens a distinct pooled connection.
+    with ThreadPoolExecutor(len(targets)) as pool:
+        connections = list(pool.map(lambda target: _hold(target), targets))
+    for connection in connections:
+        if connection is not None:
+            connection.close()
+
+
+def _hold(target):
+    from sqlalchemy import text
+    try:
+        connection = target.connect()
+        connection.execute(text("select 1"))
+        return connection
+    except Exception:
+        return None  # The request path reports database errors.
 
 def init_db():
     Base.metadata.create_all(engine)

@@ -471,7 +471,7 @@
         }
         let serverTiming;
         const data = await api(path + '?' + params, {
-          timeout: 10000,
+          timeout: 6000,
           readBody: faculty ? undefined : readLiveUpdate,
           onResponse: liveTimingEnabled ? response => { serverTiming = response.headers.get('Server-Timing'); } : undefined,
         });
@@ -523,7 +523,7 @@
         }
         tryInlinePage = false;  // Retry with metadata only if the combined response stalled.
         status.textContent = '연결을 다시 확인하는 중입니다.';
-        delay = 1200;
+        delay = err.detail === 'timeout' ? 0 : 1200;  // A stalled poll retries at once.
       } finally {
         if (!stopped) timer = setTimeout(tick, delay);
       }
