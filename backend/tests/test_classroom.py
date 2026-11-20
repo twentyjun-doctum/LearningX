@@ -4,7 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 TEMP = tempfile.TemporaryDirectory(prefix="learningx-classroom-")
 os.environ.setdefault("DATABASE_URL", "sqlite:///" + str(Path(TEMP.name) / "test.sqlite3"))
@@ -28,6 +28,16 @@ def coaching(level):
 
 
 class ClassroomTests(unittest.TestCase):
+    def test_publish_notification_does_not_wait_for_cached_pdf(self):
+        material = object()
+        prepared = Mock()
+        with patch.object(classroom, "cached_live_page", return_value=b"%PDF") as cache, \
+             patch.object(classroom, "notify") as notify:
+            classroom._notify_published_page("session", material, 9, prepared)
+        cache.assert_called_once_with(material, 9)
+        prepared.result.assert_not_called()
+        notify.assert_called_once_with("session")
+
     @classmethod
     def setUpClass(cls):
         cls.client = TestClient(app)

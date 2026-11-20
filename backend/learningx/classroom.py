@@ -625,11 +625,15 @@ def _publisher(db, credentials, session_id, current=None):
     return session_material
 
 
-def _await_page(prepared):
+def _notify_published_page(session_id, material, page, prepared):
+    # An in-flight preparation may be queued behind other pages even though
+    # this page is already served from cache. Do not delay those students.
     try:
-        prepared.result(timeout=1.5)
+        if cached_live_page(material, page) is None:
+            prepared.result(timeout=1.5)
     except Exception:
         pass  # Never hold the notification on a slow storage read.
+    notify(session_id)
 
 
 _PUBLISH_LOCK = "select id from class_sessions where id = %s for update"
@@ -760,8 +764,7 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
         result, wrote = _publish_pipelined(session_id, claims, batch_id, snapshots, data.expected_version)
         record_phase(request, "write", started)
         if wrote:
-            _await_page(prepared)
-            notify(session_id)
+            _notify_published_page(session_id, material, last_page, prepared)
         return result
     with PublishSession() as db:
         transitions = select(LiveTransition).where(LiveTransition.session_id == ClassSession.id)
@@ -824,8 +827,7 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
             initial.page, initial.total, initial.version, initial.content = page, total, version, encoded
         db.commit()
     record_phase(request, "write", started)
-    _await_page(prepared)
-    notify(session_id)
+    _notify_published_page(session_id, material, last_page, prepared)
     return {"page": page, "total": total, "version": version, **content}
 
 

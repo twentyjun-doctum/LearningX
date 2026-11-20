@@ -3,6 +3,7 @@
   const {el, LEVEL, liveMark, liveTimingEnabled} = window.QU;
   const pdfBase = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
   let pdfLibrary;
+  let pdfWorker;
   function warmPdf() {
     pdfLibrary ??= import(pdfBase + 'build/pdf.min.mjs').then(lib => {
       lib.GlobalWorkerOptions.workerSrc = pdfBase + 'build/pdf.worker.min.mjs';
@@ -15,13 +16,27 @@
   }
 
   function loadPdf(bytes) {
-    return warmPdf().then(async lib => ({
-      lib,
-      doc: await lib.getDocument({
-        data: bytes, isEvalSupported: false, useWasm: false, enableXfa: false,
+    return warmPdf().then(async lib => {
+      pdfWorker ??= new lib.PDFWorker();
+      const worker = pdfWorker;
+      try {
+        await worker.promise;
+      } catch (error) {
+        if (pdfWorker === worker) pdfWorker = null;
+        worker.destroy();
+        throw error;
+      }
+      const task = lib.getDocument({
+        worker, data: bytes, isEvalSupported: false, useWasm: false, enableXfa: false,
         cMapUrl: pdfBase + 'cmaps/', cMapPacked: true, standardFontDataUrl: pdfBase + 'standard_fonts/'
-      }).promise,
-    }));
+      });
+      try {
+        return {lib, doc: await task.promise};
+      } catch (error) {
+        await task.destroy().catch(() => {});
+        throw error;
+      }
+    });
   }
 
   async function renderPage({lib, doc}, number, width, height) {

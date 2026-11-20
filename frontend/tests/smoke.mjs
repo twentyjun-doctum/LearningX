@@ -132,6 +132,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   }
  };
  let clock = 0;
+ const workers = [];
  const api = async (path, {readBody} = {}) => {
   const url = new URL(path,'https://fixture.local');
   if (!url.pathname.includes('/page/')) {
@@ -172,7 +173,13 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   URLSearchParams,TextDecoder,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
   loadFixtureRenderer: async ()=>({
    GlobalWorkerOptions:{},TextLayer:class {async render(){}},
-   getDocument:()=>({promise:Promise.resolve({getPage:async()=>page,destroy:async()=>{},numPages:1})}),
+   PDFWorker:class {
+    constructor(){ this.promise=Promise.resolve(); workers.push(this); }
+   },
+   getDocument:({worker})=>{
+    assert.equal(worker,workers[0]);
+    return {promise:Promise.resolve({getPage:async()=>page,destroy:async()=>{},numPages:1})};
+   },
   }),
  });
  vm.runInContext(stubbed,ctx);
@@ -218,6 +225,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   await until(()=>view.page()===8,'latest page catches up while past download is stalled');
   assert.deepEqual(painted.slice(-2),['1 / 9','8 / 9']);
   assert.ok(!calls.some(([version])=>version==='v7'),'inline PDF avoids a second HTTP request');
+  assert.equal(workers.length,1,'successive slides reuse one PDF worker');
   releaseStalled(response);
   await new Promise(resolve=>setTimeout(resolve,25));
   assert.equal(lastRendered,'8 / 9','late old frame does not roll back the visible page');
