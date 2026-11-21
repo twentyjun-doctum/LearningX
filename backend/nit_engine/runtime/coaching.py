@@ -31,7 +31,7 @@ RELEVANCE = frozenset(('direct','prerequisite','out_of_unit','insufficient_conte
 SYSTEM_OBJECTIVE = '''교수자가 정한 단원 학습목표(learning_objective)가 함께 주어집니다.
 question_level은 학습목표나 지원 정도와 무관하게 학생 질문 자체가 요구하는 사고로만 판정하세요. 목표와 비슷해 보인다는 이유로 높이지 마세요.
 goal_relevance는 질문이 목표에 직접 연결되면 direct, 목표의 선행 이해에 도움이 되면 prerequisite, 단원 밖이면 out_of_unit, 판단할 맥락이 부족하면 insufficient_context입니다.
-follow_up_question은 목표의 사고 과정(process)과 연결되는 다음 한 단계만 묻고, 지원 정도(support)에 맞추세요. minimal은 필요한 자료나 관점만 짧게, directional은 살펴볼 방향을 제시, stepwise는 학생이 바로 할 수 있는 첫 단계를 구체적으로 묻습니다. 어떤 경우에도 정답이나 해설을 주지 마세요.
+process_weights가 있으면 각 사고 과정의 강조 수준(1~5, 1은 다루지 않음)이고 process는 그 가중평균에 가장 가까운 과정입니다. follow_up_question은 목표의 사고 과정(process)과 연결되는 다음 한 단계만 묻고, 지원 정도(support)에 맞추세요. minimal은 필요한 자료나 관점만 짧게, directional은 살펴볼 방향을 제시, stepwise는 학생이 바로 할 수 있는 첫 단계를 구체적으로 묻습니다. 어떤 경우에도 정답이나 해설을 주지 마세요.
 학생이 지시 대상을 모르면 목표보다 먼저 대상을 확인하세요. 더 어려운 질문으로 올리는 것만 유도하지 마세요.
 guidelines는 교수자가 승인한 코칭 지침이며, 위 규칙과 충돌하면 위 규칙을 따르세요.
 필수 키에 goal_relevance를 추가하세요.'''
@@ -174,8 +174,8 @@ def run_coaching(out, question, policy, teacher_approved, signing_secret, authen
         'required_schema':SCHEMA}
     if objective:
         payload['learning_objective']={key:objective.get(key) for key in (
-            'objective','process','evidence','support','knowledge_type','application_context',
-            'goals','evidences','guidelines')}
+            'objective','process','process_weights','evidence','support','knowledge_type','application_context',
+            'goals','evidences','guidelines') if objective.get(key) is not None or key!='process_weights'}
     model_user=json.dumps(payload,ensure_ascii=False)
     system=SYSTEM+('\n'+SYSTEM_OBJECTIVE if objective else '')
     errors=[]
