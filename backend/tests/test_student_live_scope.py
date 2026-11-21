@@ -201,6 +201,23 @@ class StudentLiveScopeTests(unittest.TestCase):
         self.assertEqual(response.content, PDF)
         self.assertIn("recheck;dur=", response.headers["server-timing"])
 
+    def test_cache_hit_returns_the_bytes_it_found(self):
+        """A hit must not be followed by a second read that could miss after an eviction."""
+        version = self.current()["version"]
+
+        def evicted_then_loaded(material, page):
+            with SessionLocal() as db:
+                db.get(LiveSlide, self.session_id).version = uid()
+                db.commit()
+            return b"%PDF-1.7 read again from storage"
+
+        with patch.object(classroom, "cached_live_page", return_value=PDF), \
+             patch.object(classroom, "page_pdf", side_effect=evicted_then_loaded) as load:
+            response = self.req("GET", f"{self.path}/page/{version}", self.student)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content, PDF)
+        load.assert_not_called()
+
     def test_cached_page_skips_the_recheck(self):
         version = self.current()["version"]
         with patch.object(classroom, "cached_live_page", return_value=PDF), \

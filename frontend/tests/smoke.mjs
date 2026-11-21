@@ -170,7 +170,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   window:mockWindow,
   document:{addEventListener(){},removeEventListener(){},documentElement:{classList:{add:x=>htmlClasses.add(x),remove:x=>htmlClasses.delete(x)}}},
   innerHeight:720, devicePixelRatio:1,
-  URLSearchParams,TextDecoder,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
+  URLSearchParams,TextDecoder,setTimeout,clearTimeout,AbortController,performance:{now:()=>clock+=400},
   loadFixtureRenderer: async ()=>({
    GlobalWorkerOptions:{},TextLayer:class {async render(){}},
    PDFWorker:class {
@@ -297,7 +297,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
   assert.ok(condition(), label);
  }
- function harness(pageResponse) {
+ function harness(pageResponse, {parkMs = 40} = {}) {
   const parts = new Map();
   const panel = node();
   panel.querySelector = key => {
@@ -306,12 +306,21 @@ console.log('OK: API origin confinement protects invite codes and tokens');
    return parts.get(key);
   };
   panel.getBoundingClientRect = () => ({left:0, top:0, width:640, height:480});
-  const state = {latest: slide(1, 'v1'), polls: [], pages: [], panel};
-  const api = async (pathname, {readBody} = {}) => {
+  const state = {latest: slide(1, 'v1'), polls: [], pages: [], cancelled: 0, panel};
+  const api = async (pathname, {readBody, signal} = {}) => {
    const url = new URL(pathname, 'https://fixture.local');
    if (!url.pathname.includes('/page/')) {
     state.polls.push(Object.fromEntries(url.searchParams));
-    await new Promise(resolve => setTimeout(resolve, url.searchParams.has('after') ? 40 : 4));
+    // A poll with `after` parks until its timeout: this server never wakes it,
+    // as when the presenter's change reached another API instance.
+    await new Promise((resolve, reject) => {
+     const wait = setTimeout(resolve, url.searchParams.has('after') ? parkMs : 4);
+     signal?.addEventListener('abort', () => {
+      clearTimeout(wait);
+      state.cancelled += 1;
+      reject(Object.assign(new Error('cancelled'), {status:0, detail:'cancelled'}));
+     });
+    });
     return {status:'OPEN', slide:state.latest, index:[], revision:'r-' + state.latest.version};
    }
    const version = url.pathname.split('/').pop();
@@ -322,7 +331,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
    window:{QU:{el:(tag, attrs, ...kids) => { const n = node(attrs); n.append(...kids); return n; }, LEVEL:{}},
     scrollX:0, scrollY:0, getSelection:() => null, addEventListener(){}, removeEventListener(){}},
    document:{addEventListener(){}, removeEventListener(){}, documentElement:{classList:{add(){}, remove(){}}}},
-   innerHeight:720, devicePixelRatio:1, URLSearchParams, TextDecoder, setTimeout, clearTimeout,
+   innerHeight:720, devicePixelRatio:1, URLSearchParams, TextDecoder, setTimeout, clearTimeout, AbortController,
    loadFixtureRenderer: async () => ({GlobalWorkerOptions:{}, TextLayer:class {async render(){}},
     PDFWorker:class { constructor(){ this.promise = Promise.resolve(); } destroy(){} },
     getDocument:() => ({promise:Promise.resolve({getPage:async () => page, destroy:async () => {}, numPages:1})})}),
@@ -348,6 +357,26 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   assert.ok(moved.polls.some((poll, i) => i > 0 && !('after' in poll)), 'a 409 polls the latest state without waiting');
  } finally { moved.view.stop(); }
 
+ // 409 while a poll is already parked on the old revision and is never woken.
+ let staleAt;
+ const parked = harness(async (version, readBody, state) => {
+  if (version === 'v1') {
+   await until(() => state.polls.some(poll => 'after' in poll), 'a poll parks before the page answers');
+   state.latest = slide(2, 'v2');
+   staleAt = performance.now();
+   throw error(409);
+  }
+  return pdfBody(readBody);
+ }, {parkMs: 1000});
+ try {
+  await until(() => parked.view.page() === 2, 'latest page shown after a 409 during a parked poll');
+  const elapsed = performance.now() - staleAt;
+  assert.equal(parked.cancelled, 1, 'the parked poll is cancelled');
+  assert.ok(elapsed < 300, `latest page took ${elapsed.toFixed(0)} ms; the parked poll would wait 1000 ms`);
+  assert.equal(parked.pages.filter(v => v === 'v1').length, 1, 'the stale page is not retried');
+  parked.parkedMs = elapsed;
+ } finally { parked.view.stop(); }
+
  // 403: access revoked while a slow page download is in flight.
  let finishSlow;
  const slow = new Promise(resolve => { finishSlow = resolve; });
@@ -368,7 +397,8 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   assert.equal(revoked.polls.length, pollsAtStop, 'no polling after access ends');
   assert.equal(revoked.pages.filter(v => v === 'v3').length, 1, 'a revoked page is not retried');
  } finally { finishSlow(); revoked.view.stop(); }
- console.log('OK: student view refetches on 409 and stops on 401/403 without late repaint');
+ console.log('OK: student view refetches on 409 (parked poll cancelled, latest page in',
+  parked.parkedMs.toFixed(0), 'ms) and stops on 401/403 without late repaint');
 }
 
 {

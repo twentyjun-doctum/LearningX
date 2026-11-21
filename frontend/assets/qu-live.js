@@ -93,6 +93,8 @@
     let retryTimer;
     let retryCount = 0;
     let refreshNow = false;
+    let pollController = null;
+    let pollParked = false;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -439,7 +441,10 @@
         }
         if (err.status === 409) {
           // The shared page changed or the class ended: poll the latest state without waiting.
+          // A poll already parked on the old revision may not be woken (another API
+          // instance, or a missed notification), so cancel it and ask again now.
           refreshNow = true;
+          if (pollParked) pollController?.abort();
           return 'stale';
         }
         status.textContent = '교안 화면을 불러오지 못했습니다.';
@@ -500,8 +505,12 @@
           params.set('partial_page', 'true');
         }
         let serverTiming;
+        const controller = new AbortController();
+        pollController = controller;
+        pollParked = params.has('after');
         const data = await api(path + '?' + params, {
           timeout: 6000,
+          signal: controller.signal,
           readBody: faculty ? undefined : readLiveUpdate,
           onResponse: liveTimingEnabled ? response => { serverTiming = response.headers.get('Server-Timing'); } : undefined,
         });
@@ -546,6 +555,7 @@
         if (data.status === 'CLOSED') stop();
       } catch (err) {
         if (stopped) return;
+        if (err.detail === 'cancelled') return;  // Replaced by an immediate fresh poll (finally).
         if (!faculty && (err.status === 401 || err.status === 403)) {
           stop();
           status.textContent = '교안 접근 권한이 없습니다.';
@@ -555,6 +565,8 @@
         status.textContent = '연결을 다시 확인하는 중입니다.';
         delay = err.detail === 'timeout' ? 0 : 1200;  // A stalled poll retries at once.
       } finally {
+        pollController = null;
+        pollParked = false;
         if (!stopped) timer = setTimeout(tick, refreshNow ? 0 : delay);
       }
     }
@@ -581,6 +593,7 @@
       }
       clearTimeout(timer);
       clearTimeout(retryTimer);
+      pollController?.abort();
       hideSelectionActions();
       panel.removeEventListener('pointerdown', hideSelectionActions);
       document.removeEventListener('selectionchange', updateSelection);

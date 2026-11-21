@@ -612,13 +612,18 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
     db.rollback()
     record_phase(request, "lookup", started)
     started = time.perf_counter()
-    was_cached = cached_live_page(material, target) is not None
+    # One cache read decides both the hit and the bytes returned: checking and
+    # then reading again could miss after an eviction and skip the re-check.
+    content = cached_live_page(material, target)
+    if content is not None:
+        record_phase(request, "pdf", started)
+        return _pdf_response(content)
     content = page_pdf(material, target)
     record_phase(request, "pdf", started)
-    if not faculty and not was_cached:
+    if not faculty:
         # Loading or splitting an uncached page can take long enough for the
         # presenter to move on or for access to be revoked. Re-check before
-        # returning bytes; the cached path answers within the same instant.
+        # returning bytes; the cached path above answers within the same instant.
         started = time.perf_counter()
         _, current, _, slide, _ = _live_reader(db, credentials, session_id, include_page=True)
         db.rollback()
