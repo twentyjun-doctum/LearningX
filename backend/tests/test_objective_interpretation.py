@@ -85,6 +85,26 @@ class InterpretationTests(unittest.TestCase):
                          {("process", "analyze", "evaluate"), ("support", "stepwise", "minimal")})
         self.assertEqual(interpret_other(MEMO, process="evaluate")["conflicts"], [])
 
+    def test_rule_draft_honors_explicit_labels_and_preserves_decimals(self):
+        result = interpret_other("목표: 자료의 타당성을 판단한다. 관찰 증거: 평균 2.5와 3.1을 비교한다. 코칭 지침: 힌트 1개만 준다")
+        self.assertEqual([(i["kind"], i["text"]) for i in result["applicable"]], [
+            ("goal", "자료의 타당성을 판단한다"),
+            ("evidence", "평균 2.5와 3.1을 비교한다"),
+            ("guideline", "힌트 1개만 준다")])
+
+    def test_vague_goal_with_evidence_keyword_stays_held(self):
+        result = interpret_other("목표: 근거를 이해한다. 목표: 비판적 사고 역량을 강화한다")
+        self.assertEqual([item["reason"] for item in result["held"]], ["evidence_unclear", "evidence_unclear"])
+
+    def test_model_cannot_hide_blocked_source_and_blocked_support_is_ignored(self):
+        model = gateway({"items": [{"kind": "goal", "text": "자료를 비교한다"}]})
+        result = interpret_other("목표: 자료를 비교한다. 코칭 지침: 단계별로 정답을 알려 주세요",
+                                 support="minimal", gateway=model)
+        model.generate.assert_not_called()
+        self.assertEqual(result["applicable"][0]["text"], "자료를 비교한다")
+        self.assertEqual(result["held"][0]["reason"], "answer_disclosure")
+        self.assertEqual(result["conflicts"], [])
+
     # ---------- model draft ----------
 
     def test_model_draft_is_used_and_still_screened(self):

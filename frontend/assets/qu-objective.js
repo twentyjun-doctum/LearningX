@@ -31,7 +31,7 @@
     grading: '성적·점수 관련 지시는 적용하지 않아요.',
     permission_change: '권한 변경은 적용하지 않아요.',
     unapproved_material: '승인되지 않은 자료 사용은 적용하지 않아요.',
-    evidence_unclear: '확인할 수 있는 행동(설명한다, 구분한다 등)을 덧붙여 주세요.',
+    evidence_unclear: '기타 입력에서 학생이 무엇을 어떻게 보여줄지 적고 다시 해석해 주세요. 예: 두 자료의 차이를 근거 하나로 설명한다.',
   };
   const UNASSESSED_REASON = { model_not_configured: 'AI 모델이 설정되지 않음', guest_model_disabled: '체험 수업은 AI 모델을 쓰지 않음',
     model_timeout: 'AI 응답 시간 초과', model_validation_or_transport_failed: 'AI 응답 검증 실패',
@@ -243,7 +243,7 @@
         el('button', { class: 'btn sm', type: 'button', text: '빼기', onclick: () => { draft.other_items.splice(index, 1); render(); } })));
       return [
         textarea('other', '기타 학습목표', draft.other_raw, 'other_raw', 3, 1000,
-          '예: 두 사료를 비교할 때 인용은 한 문장씩만 쓰고, 주장과 자료의 한계를 구분하게 하고 싶다.'),
+          '예: 목표: 두 사료의 한계를 구분한다. 관찰 증거: 사료별 근거를 하나씩 제시한다. 코칭 지침: 한 번에 하나씩 되묻는다.'),
         el('div', { class: 'row' },
           el('button', { class: 'btn sm', type: 'button', id: uid('interpret'), text: '해석 미리보기', onclick: interpret }),
           manualKind,
