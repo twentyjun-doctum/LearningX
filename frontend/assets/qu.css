@@ -374,3 +374,13 @@ html:has(#student-slide.live-expanded) {overflow:hidden;}
 .live-tab.unassessed {background: #f2f6f3; color: #4a5a53; box-shadow: inset 0 0 0 1px #cdd6d1;}
 .live-mark.unassessed {background: #8a9891;}
 .live-highlight-group.unassessed {color:#8a9891;}
+
+.live-mark.acknowledgeable {pointer-events: auto;}
+.live-mark.acknowledgeable:hover, .live-mark.acknowledgeable:focus-within,
+.live-mark.acknowledgeable.expanded {z-index: 3;}
+.live-mark-toggle {width: 100%; height: 100%; border: 0; border-radius: 50%; background: transparent; color: inherit; font: inherit; cursor: pointer; padding: 0;}
+.live-mark-confirm {display: none; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); white-space: nowrap; border: 1px solid #a64709; border-radius: .35rem; padding: .3rem .55rem; background: white; color: #803607; cursor: pointer;}
+.live-mark.acknowledgeable:hover .live-mark-confirm,
+.live-mark.acknowledgeable:focus-within .live-mark-confirm,
+.live-mark.acknowledgeable.expanded .live-mark-confirm {display: block;}
+.live-mark.acknowledgeable.dismissed .live-mark-confirm {display: none;}
