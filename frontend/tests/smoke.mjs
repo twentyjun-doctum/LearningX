@@ -268,6 +268,110 @@ console.log('OK: API origin confinement protects invite codes and tokens');
 }
 
 {
+ // Student page errors: 409 means the shared page moved on (fetch the latest
+ // state, no retry of the stale page); 401/403 means access ended (stop and
+ // clear, and a slow render finishing later must not repaint the lesson).
+ const liveSource = fs.readFileSync(path.join(root,'assets/qu-live.js'),'utf8')
+  .replace("import(pdfBase + 'build/pdf.min.mjs')", 'loadFixtureRenderer()');
+ function node(attrs = {}) {
+  return {children:[], classes:(attrs.class || '').split(' '), style:{setProperty(){}}, clientWidth:640,
+   textContent:attrs.text ?? '', classList:{add(){}, remove(){}, contains:() => false}, contains:() => false,
+   append(...nodes){for (const n of nodes.filter(Boolean)) { n.parent = this; this.children.push(n); }},
+   replaceChildren(...nodes){this.children=[]; this.append(...nodes);},
+   remove(){this.parent.children=this.parent.children.filter(n=>n!==this);},
+   querySelector(selector){
+    for (const n of this.children) {
+     if (n.classes.includes(selector.slice(1))) return n;
+     const inner = n.querySelector(selector);
+     if (inner) return inner;
+    }
+    return null;
+   }, addEventListener(){}, removeEventListener(){}};
+ }
+ const error = status => Object.assign(new Error('fixture HTTP ' + status), {status});
+ const slide = (page, version) => ({page, version, total:9, pdf:true});
+ const page = {getViewport:({scale})=>({width:100*scale,height:100*scale,scale}),
+  render:()=>({promise:Promise.resolve()}), streamTextContent(){}};
+ async function until(condition, label) {
+  const deadline = Date.now() + 1500;
+  while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(condition(), label);
+ }
+ function harness(pageResponse) {
+  const parts = new Map();
+  const panel = node();
+  panel.querySelector = key => {
+   if (key === '[data-live-confused]' || key === '[data-live-ask]') return null;
+   if (!parts.has(key)) parts.set(key, node());
+   return parts.get(key);
+  };
+  panel.getBoundingClientRect = () => ({left:0, top:0, width:640, height:480});
+  const state = {latest: slide(1, 'v1'), polls: [], pages: [], panel};
+  const api = async (pathname, {readBody} = {}) => {
+   const url = new URL(pathname, 'https://fixture.local');
+   if (!url.pathname.includes('/page/')) {
+    state.polls.push(Object.fromEntries(url.searchParams));
+    await new Promise(resolve => setTimeout(resolve, url.searchParams.has('after') ? 40 : 4));
+    return {status:'OPEN', slide:state.latest, index:[], revision:'r-' + state.latest.version};
+   }
+   const version = url.pathname.split('/').pop();
+   state.pages.push(version);
+   return pageResponse(version, readBody, state);
+  };
+  const ctx = vm.createContext({
+   window:{QU:{el:(tag, attrs, ...kids) => { const n = node(attrs); n.append(...kids); return n; }, LEVEL:{}},
+    scrollX:0, scrollY:0, getSelection:() => null, addEventListener(){}, removeEventListener(){}},
+   document:{addEventListener(){}, removeEventListener(){}, documentElement:{classList:{add(){}, remove(){}}}},
+   innerHeight:720, devicePixelRatio:1, URLSearchParams, TextDecoder, setTimeout, clearTimeout,
+   loadFixtureRenderer: async () => ({GlobalWorkerOptions:{}, TextLayer:class {async render(){}},
+    PDFWorker:class { constructor(){ this.promise = Promise.resolve(); } destroy(){} },
+    getDocument:() => ({promise:Promise.resolve({getPage:async () => page, destroy:async () => {}, numPages:1})})}),
+  });
+  vm.runInContext(liveSource, ctx);
+  state.view = ctx.window.QU.createLiveView({api, session:'fixture', panel,
+   initial:{status:'OPEN', slide:state.latest, index:[]}, onState(){}, onQuestion(){}});
+  state.content = panel.querySelector('[data-live-content]');
+  state.status = panel.querySelector('[data-live-status]');
+  return state;
+ }
+ const pdfBody = readBody => readBody({headers:new Headers(), arrayBuffer:async () => new ArrayBuffer(10)});
+
+ // 409: the presenter moved on before the student's page request was answered.
+ const moved = harness((version, readBody, state) => {
+  if (version === 'v1') { state.latest = slide(2, 'v2'); throw error(409); }
+  return pdfBody(readBody);
+ });
+ try {
+  await until(() => moved.view.page() === 2, 'student shows the latest page after a 409');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(moved.pages.filter(v => v === 'v1').length, 1, 'the stale page is not retried');
+  assert.ok(moved.polls.some((poll, i) => i > 0 && !('after' in poll)), 'a 409 polls the latest state without waiting');
+ } finally { moved.view.stop(); }
+
+ // 403: access revoked while a slow page download is in flight.
+ let finishSlow;
+ const slow = new Promise(resolve => { finishSlow = resolve; });
+ const revoked = harness(async (version, readBody) => {
+  if (version === 'v1') { await slow; return pdfBody(readBody); }
+  throw error(403);
+ });
+ try {
+  await until(() => revoked.pages.includes('v1'), 'slow first page requested');
+  revoked.latest = slide(3, 'v3');
+  await until(() => revoked.pages.includes('v3'), 'next page requested after revocation');
+  await until(() => revoked.status.textContent === '교안 접근 권한이 없습니다.', 'revocation stops the view');
+  const pollsAtStop = revoked.polls.length;
+  finishSlow();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(revoked.content.children.length, 0, 'a render finishing after revocation does not repaint');
+  assert.equal(revoked.view.page(), null);
+  assert.equal(revoked.polls.length, pollsAtStop, 'no polling after access ends');
+  assert.equal(revoked.pages.filter(v => v === 'v3').length, 1, 'a revoked page is not retried');
+ } finally { finishSlow(); revoked.view.stop(); }
+ console.log('OK: student view refetches on 409 and stops on 401/403 without late repaint');
+}
+
+{
  const source = fs.readFileSync(path.join(root, 'assets/qu-teacher.js'), 'utf8');
  const nodes = new Map();
  const $ = id => {

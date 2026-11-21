@@ -92,6 +92,7 @@
     let activeRender;
     let retryTimer;
     let retryCount = 0;
+    let refreshNow = false;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -399,7 +400,8 @@
       render.then(shown => {
         if (activeRender !== render || stopped) return;
         activeRender = null;
-        if (shown || faculty || !target || target.version !== slide?.version) {
+        // 'stale': the server moved on; the next poll brings the latest page, so do not retry this one.
+        if (shown === true || shown === 'stale' || faculty || !target || target.version !== slide?.version) {
           retryCount = 0;
           return;
         }
@@ -428,7 +430,18 @@
           frame = await pageFrame(target, target.page, w, h);
         }
       } catch (err) {
-        if (stopped || id !== renderId || err.status === 409) return;
+        if (stopped || id !== renderId) return;
+        if (!faculty && (err.status === 401 || err.status === 403)) {
+          // Access was revoked: stop showing the lesson rather than retrying.
+          stop();
+          status.textContent = '교안 접근 권한이 없습니다.';
+          return;
+        }
+        if (err.status === 409) {
+          // The shared page changed or the class ended: poll the latest state without waiting.
+          refreshNow = true;
+          return 'stale';
+        }
         status.textContent = '교안 화면을 불러오지 못했습니다.';
         return;
       }
@@ -477,8 +490,10 @@
     async function tick() {
       let delay = 0;
       try {
+        const fresh = refreshNow;
+        refreshNow = false;
         const params = new URLSearchParams({version: slide?.version || ''});
-        if (stamp !== undefined) params.set('after', stamp);
+        if (stamp !== undefined && !fresh) params.set('after', stamp);
         if (indexVersion) params.set('index_version', indexVersion);
         if (tryInlinePage) {
           params.set('inline_page', 'true');
@@ -540,7 +555,7 @@
         status.textContent = '연결을 다시 확인하는 중입니다.';
         delay = err.detail === 'timeout' ? 0 : 1200;  // A stalled poll retries at once.
       } finally {
-        if (!stopped) timer = setTimeout(tick, delay);
+        if (!stopped) timer = setTimeout(tick, refreshNow ? 0 : delay);
       }
     }
 
