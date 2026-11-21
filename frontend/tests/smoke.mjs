@@ -40,7 +40,7 @@ for(const html of [entry,teacher,student]){
  assert.doesNotMatch(html,/\sstyle=/,'CSP forbids inline style attributes');
  assert.doesNotMatch(html,/<script>(?!<\/script>)|<script(?![^>]*\bsrc=)[^>]*>/,'CSP forbids inline scripts');
 }
-for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu-plant.js','qu-live.js','qu-live-protocol.js']){
+for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu-plant.js','qu-live.js','qu-live-protocol.js','qu-objective.js']){
  const src=fs.readFileSync(path.join(root,'assets',file),'utf8');
  assert.doesNotMatch(src,/localStorage|sessionStorage|document\.cookie|indexedDB/,`${file} must keep tokens in memory only`);
  assert.doesNotMatch(src,/innerHTML|insertAdjacentHTML|eval\(|new Function/,`${file} must not inject HTML or code`);
@@ -108,6 +108,41 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  student.renderCoaching('deep', {follow_up_question: '다른 해석은 무엇일까요?'});
  assert.deepEqual(stages, ['deep'], 'validated levels still move the plant');
  console.log('OK: unassessed questions show no level, keep their own filter and never grow the plant');
+}
+
+{
+ // Unit learning objective panel: markup, load order and the pure request rules.
+ const order=[...teacher.matchAll(/<script src="assets\/([^"]+)"/g)].map(m=>m[1]);
+ assert.ok(order.indexOf('qu-api.js')<order.indexOf('qu-objective.js')&&order.indexOf('qu-objective.js')<order.indexOf('qu-teacher.js'));
+ assert.match(teacher,/<details class="card tight objective-panel" id="objective-panel">/);
+ for (const hook of ['data-objective-summary','data-objective-body','data-objective-status']) assert.ok(teacher.includes(hook), hook);
+ assert.ok(quTeacher.includes('objectivePanel.dirty()'), 'unconfirmed objective edits block class start');
+ const ctx = vm.createContext({window:{QU:{el(){}}}});
+ vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
+ const R = ctx.window.QU.objectiveRules;
+ const plain = value => JSON.parse(JSON.stringify(value));
+ assert.equal(R.PROCESSES.length, 6);
+ assert.deepEqual(plain(R.SUPPORT.map(([k]) => k)), ['minimal','directional','stepwise']);
+ const empty = R.emptyDraft();
+ assert.equal(empty.process, null, 'process starts unset');
+ assert.equal(empty.support, 'directional', 'support defaults to directional');
+ assert.deepEqual(plain(R.missing(empty)), ['학습목표','목표 사고 과정','확인할 수행 증거']);
+ const draft = {...empty, objective:'  학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다. ', process:'analyze',
+  evidence:'평균과 분포를 각각 근거로 사용한다.', other_raw:' ', other_items:[{kind:'guideline', text:' 자료와 해석을 나눠 말하도록 요청 '}, {kind:'goal', text:'  '}]};
+ assert.deepEqual(plain(R.missing(draft)), []);
+ assert.deepEqual(plain(R.payload(draft)), {objective:'학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.', process:'analyze',
+  evidence:'평균과 분포를 각각 근거로 사용한다.', support:'directional',
+  other_items:[{kind:'guideline', text:'자료와 해석을 나눠 말하도록 요청'}]}, 'unset optional fields and blank items are omitted');
+ const withOptional = R.payload({...draft, knowledge_type:'conceptual', application_context:'new_situation', other_raw:'메모'});
+ assert.deepEqual(plain([withOptional.knowledge_type, withOptional.application_context, withOptional.other_raw]), ['conceptual','new_situation','메모']);
+ const saved = {version:2, objective:draft.objective.trim(), process:'analyze', evidence:draft.evidence, support:'directional',
+  knowledge_type:null, application_context:null, other_raw:null, other_items:[{kind:'guideline', text:'자료와 해석을 나눠 말하도록 요청'}]};
+ assert.ok(R.same(R.fromProfile(saved), draft), 'whitespace-only differences are not unsaved changes');
+ assert.ok(!R.same(R.fromProfile(saved), {...draft, support:'stepwise'}));
+ assert.equal(R.summary(null), '미설정 · 기존 코칭 흐름을 사용합니다');
+ assert.equal(R.summary(saved), 'v2 · 분석 · 방향 제시 · 학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.');
+ assert.ok(R.REASON.answer_disclosure && R.REASON.evidence_unclear && R.RELEVANCE.prerequisite);
+ console.log('OK: learning objective panel loads after the API client, blocks unconfirmed edits and builds clean requests');
 }
 
 {

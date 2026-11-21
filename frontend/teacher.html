@@ -98,6 +98,11 @@
       <label class="check"><input type="checkbox" id="ai-consent">이 수업에서 학생 질문 코칭에 AI를 사용합니다. AI는 정답을 알려 주지 않고, 승인한 근거로 되묻기만 합니다.</label>
       <p class="error prepare-consent-error" id="ai-consent-error" role="alert" hidden></p>
     </div>
+    <details class="card tight objective-panel" id="objective-panel">
+      <summary><b>단원 학습목표</b> <span class="muted small" data-objective-summary>미설정</span></summary>
+      <div class="stack" data-objective-body></div>
+      <p class="small objective-status" data-objective-status role="status" aria-live="polite"></p>
+    </details>
     <div class="list">
       <div class="head row between"><span>교안 내용</span><button class="btn sm" type="button" id="select-all">모두 선택</button></div>
       <p class="muted small prepare-list-note">코칭에 사용할 내용을 한 번에 최대 1,000개 선택해 주세요. 다시 승인하면 선택한 내용으로 승인 범위가 바뀝니다.</p>
@@ -176,6 +181,7 @@
 </div>
 
 <script src="assets/qu-api.js"></script>
+<script src="assets/qu-objective.js"></script>
 <script src="assets/qu-live-protocol.js"></script>
 <script src="assets/qu-live.js"></script>
 <script src="assets/qu-teacher.js"></script>

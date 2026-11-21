@@ -17,6 +17,8 @@
   };
 
   const api = client(() => token, () => { token = null; go('login'); });
+  // Unit learning objective panel on the review/approval step.
+  const objectivePanel = window.QU.createObjectivePanel({ api, panel: $('objective-panel') });
 
   /* ---------- helpers ---------- */
   function show(node, on = true) { node.hidden = !on; }
@@ -385,6 +387,7 @@
     const res = await api(`/v1/materials/${materialId}/candidates`, { timeout: 120000 });
     const isPptx = /\.pptx$/i.test(material.filename || '');
     state.prepare = { course, material, candidates: res.eligible_candidates, approved: res.approved_count, isPptx };
+    objectivePanel.load(materialId);
     $('cand-count').textContent = String(res.eligible_candidates.length);
     $('cand-approved').textContent = String(res.approved_count);
     show($('media-notice'), isPptx); show($('media-ack-row'), isPptx);
@@ -442,6 +445,11 @@
     const items = selectedItems();
     if (items.length > MAX_APPROVAL_ITEMS) return setError($('prepare-error'), '한 번에 최대 1,000개까지 승인할 수 있습니다.');
     if (!$('ai-consent').checked) return showConsentError();
+    if (objectivePanel.dirty()) {
+      // A class uses the confirmed version; unconfirmed edits would silently not apply.
+      setError($('prepare-error'), '학습목표 변경을 확정하거나 취소한 뒤 수업을 시작해 주세요.');
+      return objectivePanel.focus();
+    }
     if (items.length && p.isPptx && !$('media-ack').checked) return setError($('prepare-error'), '분석되지 않은 오디오·도표 안내를 확인해 주세요.');
     busy(btn, true, '시작하는 중…');
     try {
