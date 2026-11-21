@@ -37,7 +37,7 @@
     <button type="button" class="btn sm" data-live-ask>이 부분으로 질문</button>
     <span class="muted" data-live-feedback role="status"></span>
   </div>
-  <div class="live-slide-layout"><div data-live-content></div><div data-live-index aria-label="현재 페이지의 내 질문 색인"></div></div>
+  <div class="live-slide-layout"><div data-live-content data-copy-protected></div><div data-live-index aria-label="현재 페이지의 내 질문 색인"></div></div>
 </section>
 <div id="screen-coach" class="stu" data-screen hidden>
   <header class="stu-head">
@@ -58,13 +58,14 @@
   <div class="composer-wrap">
     <form class="composer" id="composer" novalidate>
       <label class="sr-only" for="q-input">내 질문</label>
-      <textarea id="q-input" rows="2" maxlength="2000" placeholder="궁금한 점을 질문으로 써 보세요"></textarea>
+      <textarea id="q-input" rows="2" maxlength="2000" placeholder="궁금한 점을 질문으로 써 보세요" aria-describedby="paste-status"></textarea>
       <button class="send" type="submit" id="send" aria-label="보내기" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l15-7-5 15-2.5-6.5z" fill="#fff"/></svg>
       </button>
     </form>
     <div class="composer-hint"><span id="hint">다른 학생에게는 내 이름이 보이지 않아요</span>
       <button class="linkbtn" type="button" id="send-now" hidden>지금 교수자에게 보내기</button></div>
+    <p class="muted" id="paste-status" role="status"></p>
   </div>
 </div>
 
@@ -90,6 +91,7 @@
 
 <script src="assets/qu-api.js"></script>
 <script src="assets/qu-plant.js"></script>
+<script src="assets/qu-live-protocol.js"></script>
 <script src="assets/qu-live.js"></script>
 <script src="assets/qu-student.js"></script>
 </body>
