@@ -113,7 +113,9 @@
     }
 
     const width = () => Math.max(1, Math.floor(content.clientWidth || panel.clientWidth || 320));
-    const height = () => Math.floor(document.fullscreenElement === panel || panel.classList?.contains('live-expanded') ? innerHeight : innerHeight * .75);
+    const fullscreen = () => (document.fullscreenElement || document.webkitFullscreenElement) === panel
+      || panel.classList?.contains('live-expanded');
+    const height = () => Math.max(1, Math.floor(fullscreen() ? (panel.clientHeight || innerHeight) : innerHeight * .75));
 
     const actions = panel.querySelector('[data-live-actions]');
     const feedback = panel.querySelector('[data-live-feedback]');
@@ -134,7 +136,7 @@
 
     function showSelectionActions(hit) {
       if (!actions || !open || !picked.quote || !picked.rects.length ||
-          (document.fullscreenElement !== panel && !panel.classList.contains('live-expanded'))) return;
+          !fullscreen()) return;
       const bounds = panel.getBoundingClientRect();
       const anchorX = Math.max(8, Math.min(hit.left - bounds.left, bounds.width - 228));
       const below = hit.bottom - bounds.top + 8;
