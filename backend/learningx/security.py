@@ -68,6 +68,8 @@ def _restrict_classroom_actor(request, claims, db, user):
         ("POST", "/v1/sessions/{session_id}/questions"),
         ("POST", "/v1/session-questions/{row_id}/revisions"),
         ("POST", "/v1/session-questions/{row_id}/submit"),
+        ("POST", "/v1/session-questions/{row_id}/suitability/check"),
+        ("POST", "/v1/sessions/{session_id}/questions/submit-batch"),
     }
     if (request.method,route) not in allowed:
         raise HTTPException(403,"Session token cannot access this endpoint")

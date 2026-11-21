@@ -25,7 +25,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request,
 from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, and_, case, func, select, true
 from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
@@ -35,6 +35,7 @@ from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, prepare_shared_page, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
 from .objectives import coaching_payload, link_latest_profile, session_profile
+from . import suitability as fit
 from .security import actor, decode_token, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, LiveReadSession, PublishSession, SessionLocal, User, publish_engine, uid
 
@@ -192,10 +193,36 @@ class SessionAsk(BaseModel):
     slide_page: int | None = Field(default=None, ge=1)
     anchor: SlideAnchor | None = None
     question: str = Field(min_length=5, max_length=2000)
+    # Optional client key: a network retransmission returns the first question.
+    request_id: str | None = Field(default=None, min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class SessionRevise(BaseModel):
     text: str = Field(min_length=5, max_length=2000)
+
+
+class SuitabilityRecheck(BaseModel):
+    revision_id: str = Field(min_length=1, max_length=64)
+
+
+class SubmitRef(BaseModel):
+    question_id: str = Field(min_length=1, max_length=64)
+    revision_id: str = Field(min_length=1, max_length=64)
+
+
+class SubmitBatchIn(BaseModel):
+    request_id: str = Field(min_length=8, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    items: list[SubmitRef] = Field(min_length=1, max_length=20)
+
+    @model_validator(mode="after")
+    def unique(self):
+        if len({item.question_id for item in self.items}) != len(self.items):
+            raise ValueError("duplicate question ids")
+        return self
+
+
+class SingleSubmit(BaseModel):
+    revision_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 # ---------- helpers ----------
@@ -411,6 +438,7 @@ def open_session(course_id: str, data: OpenSession, background_tasks: Background
     # The class keeps the material's latest approved objective profile version;
     # without one, coaching follows the existing default flow.
     profile = link_latest_profile(db, s.id, m.id)
+    fit.fix_policy(db, s.id)
     _audit(db, user.id, course_id, "session_opened", m.id,
            detail=f"objective_profile_version={profile.version}" if profile else "")
     db.commit()
@@ -1211,11 +1239,35 @@ def acknowledge_confusion(session_id: str, data: ConfusionAcknowledgement,
     return {"removed": removed}
 
 
+def _lock_open(db, s):
+    """Share the session-row lock with state changes so a close and a write are ordered."""
+    db.refresh(s, with_for_update=True)
+    if s.status != "OPEN":
+        raise HTTPException(423, "The class is not taking questions right now")
+
+
+def _dispatch_check(background_tasks, row_id, revision_id):
+    # The Northflank worker polls queued checks; without it, run after the response.
+    if not fit.worker_dispatches():
+        background_tasks.add_task(fit.process, row_id, revision_id)
+
+
+def _question_response(db, row):
+    head, check = fit.current(db, row.id)
+    return {"id": row.id, "level": row.level, "coaching": _student_coaching(json.loads(row.latest_coaching_json)),
+            "revision_id": head.revision_id if head else None, "suitability": fit.public(check)}
+
+
 @router.post("/sessions/{session_id}/questions", status_code=201)
-def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session), user: User = Depends(actor)):
+def session_ask(session_id: str, data: SessionAsk, background_tasks: BackgroundTasks,
+                db: Session = Depends(session), user: User = Depends(actor)):
     s = _participant_session(db, session_id, user)
     if s.status != "OPEN":
         raise HTTPException(423, "The class is not taking questions right now")
+    if data.request_id:
+        seen = db.get(fit.AskRequest, (s.id, user.id, data.request_id))
+        if seen:
+            return _question_response(db, db.get(SessionQuestion, seen.session_question_id))
     slide = db.get(LiveSlide, session_id)
     page = slide.page if slide else None
     if data.slide_page is not None and (slide is None or data.slide_page > slide.total):
@@ -1223,7 +1275,8 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
     page = data.slide_page or page
     if data.anchor and (data.slide_page is None or page not in visible_pages(db.get(Material, s.material_id))):
         raise HTTPException(422, "Invalid question anchor")
-    coaching = _coach(db, s, user, data.question)
+    coaching = _coach(db, s, user, data.question)  # no row locks are held during the model call
+    _lock_open(db, s)
     q = Question(course_id=s.course_id, material_id=s.material_id, student_id=user.id,
                  text=data.question, feedback_json=json.dumps(coaching, ensure_ascii=False))
     db.add(q)
@@ -1232,15 +1285,29 @@ def session_ask(session_id: str, data: SessionAsk, db: Session = Depends(session
     row = SessionQuestion(session_id=s.id, question_id=q.id, student_id=user.id, level=lvl, first_level=lvl,
                           latest_text=data.question, latest_coaching_json=json.dumps(coaching, ensure_ascii=False))
     db.add(row)
+    db.flush()
+    if data.request_id:
+        db.add(fit.AskRequest(session_id=s.id, student_id=user.id, request_id=data.request_id,
+                              session_question_id=row.id))
     if page is not None:
-        db.flush()
         db.add(QuestionSlide(question_id=row.id, page=page))
         if data.anchor:
             db.add(QuestionAnchor(question_id=row.id, location=data.anchor.model_dump_json(exclude_unset=True)))
+    head, check, queued = fit.new_draft(db, row, s, data.question)
     _audit(db, user.id, s.course_id, "session_question_coached", s.material_id, detail=str(coaching.get("mode")))
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        # Two copies of the same retransmitted request: the first one wins.
+        db.rollback()
+        seen = db.get(fit.AskRequest, (s.id, user.id, data.request_id)) if data.request_id else None
+        if not seen:
+            raise
+        return _question_response(db, db.get(SessionQuestion, seen.session_question_id))
+    if queued:
+        _dispatch_check(background_tasks, row.id, head.revision_id)
     notify(s.id)
-    return {"id": row.id, "level": row.level, "coaching": _student_coaching(coaching)}
+    return _question_response(db, row)
 
 
 def _own_row(db, row_id, user):
@@ -1252,36 +1319,141 @@ def _own_row(db, row_id, user):
 
 
 @router.post("/session-questions/{row_id}/revisions", status_code=201)
-def session_revise(row_id: str, data: SessionRevise, db: Session = Depends(session), user: User = Depends(actor)):
+def session_revise(row_id: str, data: SessionRevise, background_tasks: BackgroundTasks,
+                   db: Session = Depends(session), user: User = Depends(actor)):
     row, s = _own_row(db, row_id, user)
     if s.status != "OPEN":
         raise HTTPException(423, "The class is not taking questions right now")
     if row.submitted:
         raise HTTPException(409, "Question already submitted")
     coaching = _coach(db, s, user, data.text)
+    _lock_open(db, s)
+    db.refresh(row, with_for_update=True)  # same order as submits: session row, then question rows
+    if row.submitted:
+        raise HTTPException(409, "Question already submitted")
     db.add(Revision(question_id=row.question_id, student_id=user.id, text=data.text))
     row.latest_text = data.text
     row.level = _level(coaching)
     row.latest_coaching_json = json.dumps(coaching, ensure_ascii=False)
+    head, check, queued = fit.new_draft(db, row, s, data.text)
     _audit(db, user.id, s.course_id, "session_question_revised", s.material_id)
     db.commit()
+    if queued:
+        _dispatch_check(background_tasks, row.id, head.revision_id)
     notify(s.id)
-    return {"id": row.id, "level": row.level, "coaching": _student_coaching(coaching)}
+    return _question_response(db, row)
 
 
-@router.post("/session-questions/{row_id}/submit")
-def session_submit(row_id: str, db: Session = Depends(session), user: User = Depends(actor)):
+@router.post("/session-questions/{row_id}/suitability/check")
+def recheck_suitability(row_id: str, data: SuitabilityRecheck, background_tasks: BackgroundTasks,
+                        db: Session = Depends(session), user: User = Depends(actor)):
     row, s = _own_row(db, row_id, user)
     if s.status != "OPEN":
         raise HTTPException(423, "The class is not taking questions right now")
+    if row.submitted:
+        raise HTTPException(409, {"code": "already_submitted"})
+    db.refresh(row, with_for_update=True)
+    head, check = fit.ensure_head(db, row, fit.fix_policy(db, s.id))
+    if head.revision_id != data.revision_id:
+        db.rollback()
+        raise HTTPException(409, {"code": "stale_revision"})
+    queued = False
+    # Decided results and a check already running are returned as they are (no duplicate runs).
+    if check.status == "pending" and not fit.in_flight(check):
+        queued = fit.evaluate(db, row, s, check, row.latest_text)
+    db.commit()
+    if queued:
+        _dispatch_check(background_tasks, row.id, head.revision_id)
+    if check.status != "pending" or queued:
+        notify(s.id)
+    return {"id": row.id, "revision_id": head.revision_id, "suitability": fit.public(check)}
+
+
+def _submit_problem(db, row, revision_id, policy):
+    """Why a row cannot be sent now, or None. Client-sent state is never trusted."""
+    if row.submitted:
+        return "already_submitted"
+    head, check = fit.current(db, row.id)
+    if head is None:  # written before checks existed and never checked
+        if revision_id not in (None, fit.legacy_revision(row.id)):
+            return "stale_revision"
+        return "check_pending" if fit.enforced() else None
+    if revision_id is not None and head.revision_id != revision_id:
+        return "stale_revision"
+    if not fit.enforced():
+        return None
+    if check is None or check.status == "pending":
+        return "check_pending"
+    if check.policy_version != policy:
+        return "policy_changed"
+    if check.status != "eligible":
+        return "not_eligible"
+    return None
+
+
+def _mark_submitted(db, s, user, row):
+    row.submitted = True
+    row.submitted_at = now()
+    _audit(db, user.id, s.course_id, "session_question_submitted", s.material_id)
+
+
+@router.post("/session-questions/{row_id}/submit")
+def session_submit(row_id: str, data: SingleSubmit | None = None,
+                   db: Session = Depends(session), user: User = Depends(actor)):
+    row, s = _own_row(db, row_id, user)
+    if s.status != "OPEN":
+        raise HTTPException(423, "The class is not taking questions right now")
+    _lock_open(db, s)
+    db.refresh(row, with_for_update=True)
     if not row.submitted:
-        row.submitted = True
-        row.submitted_at = now()
-        _audit(db, user.id, s.course_id, "session_question_submitted", s.material_id)
+        revision_id = data.revision_id if data else None
+        problem = _submit_problem(db, row, revision_id, fit.fix_policy(db, s.id))
+        # Gate off: the previous single submit (a pre-feature question has no draft version yet).
+        if problem and (fit.enforced() or problem == "stale_revision"):
+            db.rollback()
+            raise HTTPException(409, {"code": problem})
+        _mark_submitted(db, s, user, row)
         db.commit()
         notify(s.id)
+    head, _ = fit.current(db, row.id)
     return {"id": row.id, "submitted": True, "level": row.level, "text": row.latest_text,
-            "original": _original_text(db, row)}
+            "original": _original_text(db, row), "revision_id": head.revision_id if head else None,
+            "submitted_at": _iso(row.submitted_at)}
+
+
+@router.post("/sessions/{session_id}/questions/submit-batch")
+def submit_batch(session_id: str, data: SubmitBatchIn, db: Session = Depends(session), user: User = Depends(actor)):
+    s = _participant_session(db, session_id, user)
+    _lock_open(db, s)
+    items = [[item.question_id, item.revision_id] for item in data.items]
+    replay = db.get(fit.SubmitBatch, (s.id, user.id, data.request_id))
+    if replay:
+        if json.loads(replay.items_json) != items:
+            raise HTTPException(409, {"code": "request_id_reused"})
+        return json.loads(replay.response_json)
+    ids = sorted(item.question_id for item in data.items)
+    rows = {r.id: r for r in db.query(SessionQuestion).filter(SessionQuestion.id.in_(ids))
+            .order_by(SessionQuestion.id).with_for_update()}
+    # Another student's or another class's id rejects the whole batch without saying which.
+    if len(rows) != len(ids) or any(r.student_id != user.id or r.session_id != s.id for r in rows.values()):
+        db.rollback()
+        raise HTTPException(404, "Question not found")
+    policy = fit.fix_policy(db, s.id)
+    problems = [{"question_id": qid, "code": code} for qid, rid in items
+                if (code := _submit_problem(db, rows[qid], rid, policy))]
+    if problems:
+        db.rollback()
+        raise HTTPException(409, {"code": "batch_not_submitted", "items": problems})
+    for qid, _ in items:
+        _mark_submitted(db, s, user, rows[qid])
+    response = {"request_id": data.request_id,
+                "submitted": [{"question_id": qid, "revision_id": rid, "submitted_at": _iso(rows[qid].submitted_at)}
+                              for qid, rid in items]}
+    db.add(fit.SubmitBatch(session_id=s.id, student_id=user.id, request_id=data.request_id,
+                           items_json=json.dumps(items), response_json=json.dumps(response)))
+    db.commit()
+    notify(s.id)  # one live update per batch
+    return response
 
 
 @router.get("/sessions/{session_id}/mine")
@@ -1293,8 +1465,15 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
         SessionQuestion, SessionQuestion.id == QuestionSlide.question_id
     ).filter(SessionQuestion.session_id == session_id, SessionQuestion.student_id == user.id).all())
     originals = _original_texts(db, rows)
+    policy = fit.fix_policy(db, s.id)
+    # Unsent questions written before checks existed show as pending with a check path;
+    # sent ones keep their state and get no converted result.
+    drafts = fit.drafts_for(db, rows, policy)
+    db.commit()  # the class's policy row on first read
     return {"session": _public_session(db, s),
+            "suitability": {"enforced": fit.enforced(), "policy_version": policy},
             "items": [{"id": r.id, "slide_page": pages.get(r.id), "level": r.level, "level_label": LEVEL_LABEL[r.level],
                        "text": r.latest_text, "original": originals[r.question_id],
                        "submitted": r.submitted, "submitted_at": _iso(r.submitted_at),
+                       "revision_id": drafts[r.id][0], "suitability": drafts[r.id][1],
                        "coaching": _student_coaching(json.loads(r.latest_coaching_json))} for r in rows]}
