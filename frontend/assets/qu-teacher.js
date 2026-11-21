@@ -17,8 +17,10 @@
   };
 
   const api = client(() => token, () => { token = null; go('login'); });
-  // Unit learning objective panel on the review/approval step.
-  const objectivePanel = window.QU.createObjectivePanel({ api, panel: $('objective-panel') });
+  // Unit learning objective step, shown before evidence approval.
+  const objectiveRules = window.QU.objectiveRules;
+  const objectiveForm = window.QU.createObjectiveForm({ api, root: $('objective-form'), status: $('objective-status'),
+    onState: paintObjectiveBar });
 
   /* ---------- helpers ---------- */
   function show(node, on = true) { node.hidden = !on; }
@@ -69,6 +71,7 @@
   function screen(name) {
     for (const s of document.querySelectorAll('[data-screen]')) s.hidden = s.id !== 'screen-' + name;
     show($('prepare-bar'), name === 'prepare');
+    show($('objective-bar'), name === 'objective');
     show($('projector'), false);
     globalError(null);
     window.scrollTo(0, 0);
@@ -82,6 +85,7 @@
       switch (name) {
         case 'login': return renderLogin();
         case 'upload': return renderUpload(a);
+        case 'objective': return await renderObjective(a, b);
         case 'prepare': return await renderPrepare(a, b);
         case 'live': return await renderLive(a);
         case 'end': return await renderEnd(a);
@@ -140,8 +144,8 @@
     }
     const signed = c.materials.find((m) => m.status === 'FACULTY_SIGNED');
     const pending = c.materials.find((m) => m.status === 'PENDING_FACULTY_REVIEW');
-    if (signed) return { label: '수업 시작', cls: 'btn primary', href: `#prepare/${c.id}/${signed.id}`, meta: '승인 완료', chip: 'ok' };
-    if (pending) return { label: '검토하기', cls: 'btn', href: `#prepare/${c.id}/${pending.id}`, meta: '검토 대기', chip: 'warn' };
+    if (signed) return { label: '수업 시작', cls: 'btn primary', href: `#objective/${c.id}/${signed.id}`, meta: '승인 완료', chip: 'ok' };
+    if (pending) return { label: '검토하기', cls: 'btn', href: `#objective/${c.id}/${pending.id}`, meta: '검토 대기', chip: 'warn' };
     return { label: '교안 올리기', cls: 'btn', href: `#upload/${c.id}`, meta: '교안 없음', chip: '' };
   }
 
@@ -284,7 +288,7 @@
         u.timer = null;
         if (u.file && /\.pdf$/i.test(u.file.name)) uploadedPdf = {material: job.material_id, file: u.file};
         await loadCourses().catch(() => {});
-        return go(`prepare/${u.courseId}/${job.material_id}`);
+        return go(`objective/${u.courseId}/${job.material_id}`);
       }
       if (job.status === 'FAILED') {
         setError($('upload-error'), '교안을 분석하지 못했습니다. 다시 시도하거나 다른 파일을 올려 주세요.');
@@ -349,7 +353,83 @@
     }
   });
 
-  /* ---------- 4 · 검토·승인 ---------- */
+  /* ---------- 3 · 학습목표 ---------- */
+  async function renderObjective(courseId, materialId) {
+    if (!state.courses.length) await loadCourses();
+    const course = state.courses.find((c) => c.id === courseId);
+    if (!course) return go('courses');
+    header({ crumb: course.title, step: 2, back: true });
+    screen('objective');
+    state.objective = { courseId, materialId };
+    resetSkip();
+    await objectiveForm.load(materialId);
+  }
+
+  function paintObjectiveBar({ saved, dirty, missing, busy: working }) {
+    const next = $('objective-next');
+    const skip = $('objective-skip');
+    $('objective-bar-state').textContent = saved ? `v${saved.version} 확정됨${dirty ? ' · 변경 있음' : ''}` : dirty ? '작성 중' : '미설정';
+    $('objective-bar-hint').textContent = dirty && missing.length ? `${missing.join(', ')}을(를) 적으면 확정할 수 있어요`
+      : dirty ? '확정하면 이후 여는 수업부터 이 설정을 써요'
+        : saved ? objectiveRules.summary(saved).replace(/^v\d+ · /, '')
+          : '학습목표와 수행 증거를 적으면 확정할 수 있어요';
+    next.textContent = dirty || !saved ? '확정하고 다음' : '다음';
+    next.disabled = working || (dirty ? missing.length > 0 : !saved);
+    show(skip, !saved || dirty);
+    if (!skip.dataset.confirm) skip.textContent = saved ? '변경 취소하고 다음' : '다음에 설정';
+  }
+
+  function resetSkip() {
+    const skip = $('objective-skip');
+    skip.dataset.confirm = '';
+    skip.classList.remove('dark');
+  }
+
+  function toApproval() {
+    const { courseId, materialId } = state.objective;
+    go(`prepare/${courseId}/${materialId}`);
+  }
+
+  $('objective-next').addEventListener('click', async () => {
+    const btn = $('objective-next');
+    if (btn.disabled || !state.objective) return;
+    const { dirty } = objectiveForm.state();
+    if (dirty) {
+      busy(btn, true, '확정하는 중…');
+      try { await objectiveForm.save(); } catch (_) { busy(btn, false); return; }
+      busy(btn, false);
+    }
+    toApproval();
+  });
+
+  $('objective-skip').addEventListener('click', () => {
+    const btn = $('objective-skip');
+    const { saved, dirty } = objectiveForm.state();
+    // Unconfirmed input would be lost: ask once more before leaving.
+    if (dirty && btn.dataset.confirm !== 'yes') {
+      btn.dataset.confirm = 'yes';
+      btn.classList.add('dark');
+      btn.textContent = saved ? '변경을 버리고 진행' : '입력한 내용을 버리고 진행';
+      setTimeout(() => { resetSkip(); paintObjectiveBar(objectiveForm.state()); }, 4000);
+      return;
+    }
+    resetSkip();
+    objectiveForm.discard();
+    toApproval();
+  });
+
+  async function paintObjectiveSummary(courseId, materialId) {
+    $('objective-edit').setAttribute('href', `#objective/${courseId}/${materialId}`);
+    $('objective-summary-text').textContent = '불러오는 중…';
+    try {
+      const res = await api(`/v1/materials/${materialId}/objective-profiles`);
+      $('objective-summary-text').textContent = objectiveRules.summary(res.latest);
+    } catch (_) {
+      $('objective-summary-text').textContent = '불러오지 못했어요. 미설정이면 기존 코칭 흐름을 사용합니다.';
+    }
+  }
+
+  /* ---------- 4 · 교안 승인 ---------- */
   function clearConsentError() {
     setError($('ai-consent-error'), null);
     $('prepare-consent').classList.remove('consent-required');
@@ -377,7 +457,7 @@
     const course = state.courses.find((c) => c.id === courseId);
     if (!course) return go('courses');
     const material = (course.materials || []).find((m) => m.id === materialId) || { id: materialId, filename: '' };
-    header({ crumb: course.title, step: 2, back: true });
+    header({ crumb: course.title, step: 3, back: true });
     screen('prepare');
     clearConsentError();
     setError($('prepare-error'), null);
@@ -387,7 +467,7 @@
     const res = await api(`/v1/materials/${materialId}/candidates`, { timeout: 120000 });
     const isPptx = /\.pptx$/i.test(material.filename || '');
     state.prepare = { course, material, candidates: res.eligible_candidates, approved: res.approved_count, isPptx };
-    objectivePanel.load(materialId);
+    paintObjectiveSummary(courseId, materialId);
     $('cand-count').textContent = String(res.eligible_candidates.length);
     $('cand-approved').textContent = String(res.approved_count);
     show($('media-notice'), isPptx); show($('media-ack-row'), isPptx);
@@ -445,11 +525,6 @@
     const items = selectedItems();
     if (items.length > MAX_APPROVAL_ITEMS) return setError($('prepare-error'), '한 번에 최대 1,000개까지 승인할 수 있습니다.');
     if (!$('ai-consent').checked) return showConsentError();
-    if (objectivePanel.dirty()) {
-      // A class uses the confirmed version; unconfirmed edits would silently not apply.
-      setError($('prepare-error'), '학습목표 변경을 확정하거나 취소한 뒤 수업을 시작해 주세요.');
-      return objectivePanel.focus();
-    }
     if (items.length && p.isPptx && !$('media-ack').checked) return setError($('prepare-error'), '분석되지 않은 오디오·도표 안내를 확인해 주세요.');
     busy(btn, true, '시작하는 중…');
     try {
@@ -597,7 +672,7 @@
 
   function paintLiveHeader() {
     const s = state.live.session;
-    header({ crumb: s.course_title, step: 3, live: s.status === 'OPEN', paused: s.status === 'PAUSED', back: true });
+    header({ crumb: s.course_title, step: 4, live: s.status === 'OPEN', paused: s.status === 'PAUSED', back: true });
     $('pause-toggle').textContent = s.status === 'PAUSED' ? '질문 다시 받기' : '질문 받기 멈춤';
     $('live-joined').textContent = `${s.participants || 0}명`;
   }

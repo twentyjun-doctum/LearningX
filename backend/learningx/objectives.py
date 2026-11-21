@@ -32,7 +32,7 @@ SUPPORT_LEVELS = ("minimal", "directional", "stepwise")
 KNOWLEDGE_TYPES = ("factual", "conceptual", "procedural", "metacognitive")
 APPLICATION_CONTEXTS = ("within_lesson", "similar_case", "new_situation")
 OTHER_KINDS = ("goal", "evidence", "guideline")
-PROCESS_LABEL = {"remember": "기억", "understand": "이해", "apply": "적용",
+PROCESS_LABEL = {"remember": "기억", "understand": "기억·이해", "apply": "적용",
                  "analyze": "분석", "evaluate": "평가", "create": "창안"}
 SUPPORT_LABEL = {"minimal": "힌트 최소", "directional": "방향 제시", "stepwise": "단계별 안내"}
 MAX_OTHER_ITEMS = 6

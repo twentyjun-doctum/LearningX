@@ -111,22 +111,30 @@ console.log('OK: API origin confinement protects invite codes and tokens');
 }
 
 {
- // Unit learning objective panel: markup, load order and the pure request rules.
+ // Unit learning objective step: its own screen before evidence approval, load order and the pure request rules.
  const order=[...teacher.matchAll(/<script src="assets\/([^"]+)"/g)].map(m=>m[1]);
  assert.ok(order.indexOf('qu-api.js')<order.indexOf('qu-objective.js')&&order.indexOf('qu-objective.js')<order.indexOf('qu-teacher.js'));
- assert.match(teacher,/<details class="card tight objective-panel" id="objective-panel">/);
- for (const hook of ['data-objective-summary','data-objective-body','data-objective-status']) assert.ok(teacher.includes(hook), hook);
- assert.ok(quTeacher.includes('objectivePanel.dirty()'), 'unconfirmed objective edits block class start');
+ assert.ok(teacher.indexOf('id="screen-objective"') < teacher.indexOf('id="screen-prepare"'), 'objective screen precedes approval');
+ assert.ok(!teacher.includes('objective-panel'), 'objective is no longer bundled into the approval screen');
+ for (const id of ['objective-form','objective-status','objective-bar','objective-next','objective-skip','objective-summary-text','objective-edit'])
+  assert.ok(teacher.includes(`id="${id}"`), id);
+ assert.deepEqual([...teacher.matchAll(/<span data-step="\d"><i>\d<\/i>([^<]+)<\/span>/g)].map(m=>m[1]), ['교안 올리기','학습목표','교안 승인','수업 시작']);
+ assert.ok(quTeacher.includes("case 'objective'") && quTeacher.includes('go(`objective/${u.courseId}/${job.material_id}`)'), 'upload continues to the objective step');
+ assert.ok(quTeacher.includes('objectiveForm.save()') && quTeacher.includes('objectiveForm.discard()'), 'next confirms, skip discards');
+ assert.ok(!quTeacher.includes('objectivePanel'), 'old panel wiring removed');
  const ctx = vm.createContext({window:{QU:{el(){}}}});
  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
  const R = ctx.window.QU.objectiveRules;
  const plain = value => JSON.parse(JSON.stringify(value));
- assert.equal(R.PROCESSES.length, 6);
+ assert.deepEqual(plain(R.PROCESSES.map(([k, t]) => [k, t])), [['understand','기억·이해'],['apply','적용'],['analyze','분석'],['evaluate','평가'],['create','창안']]);
+ assert.equal(R.stepOf('remember'), 0, 'legacy remember profiles land on step 1');
+ assert.equal(R.processAt(9), 'create');
  assert.deepEqual(plain(R.SUPPORT.map(([k]) => k)), ['minimal','directional','stepwise']);
  const empty = R.emptyDraft();
- assert.equal(empty.process, null, 'process starts unset');
+ assert.equal(empty.process, 'analyze', 'scale starts at the middle step');
+ assert.equal(R.stepOf(empty.process), 2);
  assert.equal(empty.support, 'directional', 'support defaults to directional');
- assert.deepEqual(plain(R.missing(empty)), ['학습목표','목표 사고 과정','확인할 수행 증거']);
+ assert.deepEqual(plain(R.missing(empty)), ['학습목표','확인할 수행 증거']);
  const draft = {...empty, objective:'  학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다. ', process:'analyze',
   evidence:'평균과 분포를 각각 근거로 사용한다.', other_raw:' ', other_items:[{kind:'guideline', text:' 자료와 해석을 나눠 말하도록 요청 '}, {kind:'goal', text:'  '}]};
  assert.deepEqual(plain(R.missing(draft)), []);
@@ -142,7 +150,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.equal(R.summary(null), '미설정 · 기존 코칭 흐름을 사용합니다');
  assert.equal(R.summary(saved), 'v2 · 분석 · 방향 제시 · 학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.');
  assert.ok(R.REASON.answer_disclosure && R.REASON.evidence_unclear && R.RELEVANCE.prerequisite);
- console.log('OK: learning objective panel loads after the API client, blocks unconfirmed edits and builds clean requests');
+ console.log('OK: learning objective step precedes approval, uses a 5-step scale defaulting to the middle and builds clean requests');
 }
 
 {
