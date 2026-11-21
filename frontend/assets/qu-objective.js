@@ -116,9 +116,14 @@
     const notify = () => onState?.(state());
     const set = (patch) => { Object.assign(draft, patch); render(); };
 
+    // Required cards carry a visible "*" (read as "필수" by screen readers).
     function card(title, hint, ...children) {
+      const required = title.endsWith('*');
+      const name = required ? title.slice(0, -1).trim() : title;
       return el('section', { class: 'card obj-card' },
-        el('div', { class: 'obj-card-head' }, el('h2', { class: 'obj-title', text: title }),
+        el('div', { class: 'obj-card-head' }, el('h2', { class: 'obj-title' }, name,
+          required ? el('span', { class: 'obj-req', 'aria-hidden': 'true', text: '*' }) : null,
+          required ? el('span', { class: 'sr-only', text: ' (필수)' }) : null),
           hint ? el('p', { class: 'muted small', text: hint }) : null),
         ...children);
     }
@@ -131,9 +136,9 @@
       return details;
     }
 
-    function textarea(id, name, value, key, rows = 2, max = 300, placeholder = '') {
+    function textarea(id, name, value, key, rows = 2, max = 300, placeholder = '', required = false) {
       return el('textarea', { id: uid(id), class: 'obj-text', rows, maxlength: max, text: value, placeholder,
-        'aria-label': name, oninput: (e) => { draft[key] = e.target.value; refresh(); } });
+        'aria-label': name, 'aria-required': required ? 'true' : null, oninput: (e) => { draft[key] = e.target.value; refresh(); } });
     }
 
     // One 5-level slider per process: native range inputs (arrow keys, Home/End, touch) drawn as
@@ -277,12 +282,12 @@
       const focusExample = () => PROCESSES.find(([k]) => k === rules.focus(draft.weights))[3];
       const example = focusExample();
       root.replaceChildren(
-        card('단원 학습목표', '“학생은 [조건·자료]를 사용해 [대상]을 [관찰 가능한 행동]할 수 있다.”',
+        card('단원 학습목표 *', '“학생은 [조건·자료]를 사용해 [대상]을 [관찰 가능한 행동]할 수 있다.”',
           textarea('objective', '단원 학습목표', draft.objective, 'objective', 2, 300,
-            '학생은 토론 전후 분포를 보고 평균 변화가 어느 집단의 변화에서 비롯됐는지 설명할 수 있다.')),
+            '학생은 토론 전후 분포를 보고 평균 변화가 어느 집단의 변화에서 비롯됐는지 설명할 수 있다.', true)),
         card('목표 사고 과정', '이번 단원에서 각 사고 과정을 얼마나 강조할지 정해 주세요. 학생 질문의 수준 판정에는 쓰지 않아요.', scale()),
-        card('확인할 수행 증거', '학생 설명에서 무엇이 보이면 목표에 다가갔다고 볼지 적어 주세요.',
-          textarea('evidence', '확인할 수행 증거', draft.evidence, 'evidence', 2, 300, example),
+        card('확인할 수행 증거 *', '학생 설명에서 무엇이 보이면 목표에 다가갔다고 볼지 적어 주세요.',
+          textarea('evidence', '확인할 수행 증거', draft.evidence, 'evidence', 2, 300, example, true),
           el('div', { class: 'row' }, el('span', { class: 'muted small grow', id: uid('evidence-example'), text: `예시 · ${example}` }),
             el('button', { class: 'btn sm', type: 'button', text: '예시 넣기',
               onclick: () => set({ evidence: focusExample() }) }))),
