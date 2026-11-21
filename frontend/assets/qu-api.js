@@ -42,9 +42,14 @@
 
   function client(getToken, onUnauthorized) {
     const base = apiBase();
-    return async function request(path, { method = 'GET', body, raw = false, readBody, onResponse, timeout = 60000 } = {}) {
+    return async function request(path, { method = 'GET', body, raw = false, readBody, onResponse, timeout = 60000, signal } = {}) {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
+      // A caller may cancel a request it no longer needs (for example a parked live poll).
+      const cancel = () => controller.abort();
+      if (signal?.aborted) cancel();
+      else signal?.addEventListener('abort', cancel, { once: true });
+      const abortReason = () => (signal?.aborted ? 'cancelled' : 'timeout');
       try {
         const headers = {};
         if (body !== undefined) headers['Content-Type'] = 'application/json';
@@ -58,7 +63,7 @@
             body: body === undefined ? undefined : JSON.stringify(body),
           });
         } catch (err) {
-          throw new ApiError(0, err && err.name === 'AbortError' ? 'timeout' : 'network');
+          throw new ApiError(0, err && err.name === 'AbortError' ? abortReason() : 'network');
         }
         if (!response.ok) {
           let detail = '';
@@ -71,7 +76,7 @@
           try {
             return await readBody(response);
           } catch (err) {
-            if (controller.signal.aborted) throw new ApiError(0, 'timeout');
+            if (controller.signal.aborted) throw new ApiError(0, abortReason());
             throw err;
           }
         }
@@ -79,6 +84,7 @@
         return await response.json();
       } finally {
         clearTimeout(timer);
+        signal?.removeEventListener('abort', cancel);
       }
     };
   }
@@ -99,7 +105,9 @@
     return node;
   }
 
-  const LEVEL = { shallow: '얕은', mid: '중간', deep: '깊은' };
+  const LEVEL = { shallow: '얕은', mid: '중간', deep: '깊은', unassessed: '판정 보류' };
+  // A question whose judgment failed (fallback coaching) has no level to show.
+  const levelText = (level) => (level === 'unassessed' ? '수준 판정 보류' : `${LEVEL[level]} 질문`);
 
   function relTime(iso) {
     if (!iso) return '';
@@ -118,5 +126,5 @@
     });
   }
 
-  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime, liveMark, liveTimingEnabled: traceEnabled };
+  window.QU = { apiBase, client, ApiError, el, LEVEL, levelText, relTime, liveMark, liveTimingEnabled: traceEnabled };
 })();

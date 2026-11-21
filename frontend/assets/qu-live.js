@@ -1,6 +1,6 @@
 (() => {
   'use strict';
-  const {el, LEVEL, liveMark, liveTimingEnabled} = window.QU;
+  const {el, LEVEL, liveMark, liveTimingEnabled, liveProtocol} = window.QU;
   const pdfBase = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@5.4.624/';
   let pdfLibrary;
   let pdfWorker;
@@ -92,6 +92,9 @@
     let activeRender;
     let retryTimer;
     let retryCount = 0;
+    let refreshNow = false;
+    let pollController = null;
+    let pollParked = false;
 
     function cached(key, make) {
       if (frames.has(key)) {
@@ -200,7 +203,13 @@
       picked = {rects, x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
         y: clamp((hit.top + hit.height / 2 - area.top) / area.height),
         quote: range.toString().trim().slice(0, 240)};
-      if (feedback) feedback.textContent = picked.quote ? '선택: “' + picked.quote + '”' : '';
+      if (feedback) {
+        if (picked.quote) {
+          feedback.replaceChildren(el('span', {'data-copy-protected': true, text: '선택: “' + picked.quote + '”'}));
+        } else {
+          feedback.replaceChildren();
+        }
+      }
       if (!drag) showSelectionActions(hit);
       paintIndex();
     }
@@ -267,7 +276,7 @@
         }, el('span', {class: 'live-tab-label', text: (number + 1) + ' · ' + LEVEL[item.level]}),
         el('span', {class: 'live-tab-number', text: number + 1, 'aria-hidden': 'true'}),
         el('span', {class: 'live-tab-preview'},
-          item.anchor?.quote ? el('small', {text: '“' + item.anchor.quote + '”'}) : null,
+          item.anchor?.quote ? el('small', {'data-copy-protected': true, text: '“' + item.anchor.quote + '”'}) : null,
           el('span', {text: item.text || LEVEL[item.level] + ' 질문'})))));
         if (strip) {
           const groups = new Map();
@@ -399,7 +408,8 @@
       render.then(shown => {
         if (activeRender !== render || stopped) return;
         activeRender = null;
-        if (shown || faculty || !target || target.version !== slide?.version) {
+        // 'stale': the server moved on; the next poll brings the latest page, so do not retry this one.
+        if (shown === true || shown === 'stale' || faculty || !target || target.version !== slide?.version) {
           retryCount = 0;
           return;
         }
@@ -428,7 +438,21 @@
           frame = await pageFrame(target, target.page, w, h);
         }
       } catch (err) {
-        if (stopped || id !== renderId || err.status === 409) return;
+        if (stopped || id !== renderId) return;
+        if (!faculty && (err.status === 401 || err.status === 403)) {
+          // Access was revoked: stop showing the lesson rather than retrying.
+          stop();
+          status.textContent = '교안 접근 권한이 없습니다.';
+          return;
+        }
+        if (err.status === 409) {
+          // The shared page changed or the class ended: poll the latest state without waiting.
+          // A poll already parked on the old revision may not be woken (another API
+          // instance, or a missed notification), so cancel it and ask again now.
+          refreshNow = true;
+          if (pollParked) pollController?.abort();
+          return 'stale';
+        }
         status.textContent = '교안 화면을 불러오지 못했습니다.';
         return;
       }
@@ -461,15 +485,8 @@
     }
 
     async function readLiveUpdate(response) {
-      if (!response.headers.get('Content-Type')?.startsWith('application/vnd.question-up.live-page')) {
-        return response.json();
-      }
-      const buffer = await response.arrayBuffer();
-      const length = new DataView(buffer).getUint32(0);
-      const end = 4 + length;
-      if (end >= buffer.byteLength) throw new Error('Incomplete live page response');
-      const data = JSON.parse(new TextDecoder().decode(new Uint8Array(buffer, 4, length)));
-      return {...data, inlinePdf: buffer.slice(end)};
+      if (!liveProtocol.isLivePage(response.headers.get('Content-Type'))) return response.json();
+      return liveProtocol.decodeLiveFrame(await response.arrayBuffer());
     }
 
     let tryInlinePage = !faculty;
@@ -477,26 +494,27 @@
     async function tick() {
       let delay = 0;
       try {
-        const params = new URLSearchParams({version: slide?.version || ''});
-        if (stamp !== undefined) params.set('after', stamp);
-        if (indexVersion) params.set('index_version', indexVersion);
-        if (tryInlinePage) {
-          params.set('inline_page', 'true');
-          params.set('partial_page', 'true');
-        }
+        const fresh = refreshNow;
+        refreshNow = false;
+        const query = liveProtocol.pollQuery({version: slide?.version, stamp, indexVersion, inline: tryInlinePage, fresh});
         let serverTiming;
-        const data = await api(path + '?' + params, {
+        const controller = new AbortController();
+        pollController = controller;
+        pollParked = new URLSearchParams(query).has('after');
+        const data = await api(path + '?' + query, {
           timeout: 6000,
+          signal: controller.signal,
           readBody: faculty ? undefined : readLiveUpdate,
           onResponse: liveTimingEnabled ? response => { serverTiming = response.headers.get('Server-Timing'); } : undefined,
         });
         if (stopped) return;
         tryInlinePage = !faculty;
-        stamp = data.partial ? undefined : data.revision;
-        if (!data.partial && stamp === undefined) delay = 2000;
-        if (data.slide && (data.slide.sequence ?? 0) < (slide?.sequence ?? 0)) return;
-        if (data.slide && (data.slide.sequence ?? 0) >= (confirmed?.sequence ?? 0)) confirmed = data.slide;
-        const changed = slide?.version !== data.slide?.version;
+        const update = liveProtocol.applyUpdate({slide, confirmed}, data);
+        stamp = update.stamp;
+        delay = update.delay;
+        if (update.stale) return;
+        confirmed = update.confirmed;
+        const changed = update.changed;
         if (changed) {
           if (!faculty) {
             frames.clear();
@@ -531,6 +549,7 @@
         if (data.status === 'CLOSED') stop();
       } catch (err) {
         if (stopped) return;
+        if (err.detail === 'cancelled') return;  // Replaced by an immediate fresh poll (finally).
         if (!faculty && (err.status === 401 || err.status === 403)) {
           stop();
           status.textContent = '교안 접근 권한이 없습니다.';
@@ -540,7 +559,9 @@
         status.textContent = '연결을 다시 확인하는 중입니다.';
         delay = err.detail === 'timeout' ? 0 : 1200;  // A stalled poll retries at once.
       } finally {
-        if (!stopped) timer = setTimeout(tick, delay);
+        pollController = null;
+        pollParked = false;
+        if (!stopped) timer = setTimeout(tick, refreshNow ? 0 : delay);
       }
     }
 
@@ -566,6 +587,7 @@
       }
       clearTimeout(timer);
       clearTimeout(retryTimer);
+      pollController?.abort();
       hideSelectionActions();
       panel.removeEventListener('pointerdown', hideSelectionActions);
       document.removeEventListener('selectionchange', updateSelection);
@@ -616,7 +638,7 @@
       stop, select, resize, page: () => displayed,
       confirmedVersion: () => confirmed?.version,
       acknowledge: result => {
-        if (stopped || (result.sequence ?? 0) < (confirmed?.sequence ?? 0)) return;
+        if (stopped || !liveProtocol.acceptsAcknowledgement(confirmed, result)) return;
         if (result.version) confirmed = result;
         if (selected === null || selected === result.page) navigation = result;
       },
@@ -624,10 +646,7 @@
         if (!deck) return null;
         const current = selected ?? slide?.page ?? displayed;
         if (current === null) return null;
-        if (visiblePages.length) return visiblePages[visiblePages.indexOf(current) + delta];
-        if (navigation?.page === current && navigation.pdf) return delta < 0 ? navigation.before : navigation.after;
-        const next = current + delta;
-        return next >= 1 && next <= deck.doc.numPages ? next : null;
+        return liveProtocol.neighborPage({visiblePages, navigation, current, delta, pageCount: deck.doc.numPages});
       },
       target: () => selected ?? slide?.page ?? displayed,
       total: () => deck?.doc.numPages ?? slide?.total,

@@ -26,7 +26,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, and_, case, func, select, true
 from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
 from . import engine_adapter as nit
@@ -47,7 +47,12 @@ MAX_INLINE_PAGE_BYTES = 2 * 1024 * 1024
 STUDENT_TOKEN_MINUTES = 240
 LEVEL_MAP = {"clarify": "shallow", "apply": "mid", "analyze": "mid",
              "evaluate": "deep", "create": "deep"}
-LEVEL_LABEL = {"shallow": "얕은", "mid": "중간", "deep": "깊은"}
+# A level exists only when the model's judgment passed schema and policy checks.
+# Fallback coaching (no matching approved evidence, model timeout or failure,
+# guest classes without a model) is recorded as unassessed, never as a level.
+# Its reason stays in the stored coaching JSON (mode, reason).
+UNASSESSED = "unassessed"
+LEVEL_LABEL = {"shallow": "얕은", "mid": "중간", "deep": "깊은", UNASSESSED: "판정 보류"}
 
 
 def now():
@@ -214,15 +219,18 @@ def _new_code(db) -> str:
 
 
 def _level(coaching: dict) -> str:
-    return LEVEL_MAP.get(str(coaching.get("question_level", "")), "shallow")
+    if coaching.get("mode") != "MODEL_VALIDATED":
+        return UNASSESSED
+    return LEVEL_MAP.get(str(coaching.get("question_level", "")), UNASSESSED)
 
 
 def _student_coaching(coaching: dict) -> dict:
     """Only fields a student screen needs; never model metadata."""
+    level = _level(coaching)
     return {
         "mode": coaching.get("mode"),
-        "question_level": coaching.get("question_level"),
-        "level": _level(coaching),
+        "question_level": None if level == UNASSESSED else coaching.get("question_level"),
+        "level": level,
         "follow_up_question": coaching.get("follow_up_question"),
         "feedback": coaching.get("feedback"),
         "evidence_refs": [{"page": r.get("page")} for r in coaching.get("evidence_refs", []) if isinstance(r, dict)],
@@ -250,32 +258,78 @@ def _iso(dt):
 
 
 def _public_session(db, s: ClassSession, faculty=False) -> dict:
-    c = db.get(Course, s.course_id)
-    data = {"id": s.id, "course_id": s.course_id, "course_title": c.title if c else "",
-            "status": s.status, "created_at": _iso(s.created_at), "closed_at": _iso(s.closed_at)}
+    return _public_sessions(db, [s], faculty)[0]
+
+
+def _public_sessions(db, sessions, faculty=False) -> list[dict]:
+    """Session summaries with a fixed number of queries, however many questions exist."""
+    if not sessions:
+        return []
+    ids = [s.id for s in sessions]
+    titles = dict(db.query(Course.id, Course.title)
+                  .filter(Course.id.in_({s.course_id for s in sessions})).all())
+    stats = {}
     if faculty:
-        rows = db.query(SessionQuestion).filter_by(session_id=s.id).all()
-        submitted = [r for r in rows if r.submitted]
-        data.update({
-            "join_code": s.join_code if s.status != "CLOSED" else None,
-            "material_id": s.material_id,
-            "participants": db.query(SessionParticipant).filter_by(session_id=s.id).count(),
-            "questions_submitted": len(submitted),
-            "questions_deep": sum(1 for r in submitted if r.level == "deep"),
-            "questions_revised": sum(1 for r in submitted if r.latest_text != _original_text(db, r)),
-            "questions_projected": sum(1 for r in submitted if r.projected_at),
-            "projected_id": s.projected_id,
-        })
-    return data
+        participants = dict(db.query(SessionParticipant.session_id, func.count())
+                            .filter(SessionParticipant.session_id.in_(ids))
+                            .group_by(SessionParticipant.session_id).all())
+        submitted = SessionQuestion.submitted.is_(True)
+
+        def submitted_where(condition):
+            return func.coalesce(func.sum(case((and_(submitted, condition), 1), else_=0)), 0)
+
+        # A question whose original row is missing counts as unrevised, as before.
+        rows = (db.query(SessionQuestion.session_id,
+                         submitted_where(true()),
+                         submitted_where(SessionQuestion.level == "deep"),
+                         submitted_where(and_(Question.id.isnot(None),
+                                              SessionQuestion.latest_text != Question.text)),
+                         submitted_where(SessionQuestion.projected_at.isnot(None)))
+                .outerjoin(Question, Question.id == SessionQuestion.question_id)
+                .filter(SessionQuestion.session_id.in_(ids))
+                .group_by(SessionQuestion.session_id).all())
+        counts = {row[0]: [int(value) for value in row[1:]] for row in rows}
+        for session_id in ids:
+            total, deep, revised, projected = counts.get(session_id, (0, 0, 0, 0))
+            stats[session_id] = {"participants": participants.get(session_id, 0),
+                                 "questions_submitted": total, "questions_deep": deep,
+                                 "questions_revised": revised, "questions_projected": projected}
+    result = []
+    for s in sessions:
+        data = {"id": s.id, "course_id": s.course_id, "course_title": titles.get(s.course_id, ""),
+                "status": s.status, "created_at": _iso(s.created_at), "closed_at": _iso(s.closed_at)}
+        if faculty:
+            item = stats[s.id]
+            data.update({
+                "join_code": s.join_code if s.status != "CLOSED" else None,
+                "material_id": s.material_id,
+                "participants": item["participants"],
+                "questions_submitted": item["questions_submitted"],
+                "questions_deep": item["questions_deep"],
+                "questions_revised": item["questions_revised"],
+                "questions_projected": item["questions_projected"],
+                "projected_id": s.projected_id,
+            })
+        result.append(data)
+    return result
 
 
 def _original_text(db, row: SessionQuestion) -> str:
-    q = db.get(Question, row.question_id)
-    return q.text if q else row.latest_text
+    return _original_texts(db, [row])[row.question_id]
 
 
-def _board_item(db, row: SessionQuestion) -> dict:
-    original = _original_text(db, row)
+def _original_texts(db, rows) -> dict[str, str]:
+    """First-asked text for each question, read in bounded batches instead of per row."""
+    wanted = list({row.question_id for row in rows})
+    found = {}
+    for start in range(0, len(wanted), 500):
+        found.update(db.query(Question.id, Question.text)
+                     .filter(Question.id.in_(wanted[start:start + 500])).all())
+    return {row.question_id: found.get(row.question_id, row.latest_text) for row in rows}
+
+
+def _board_item(db, row: SessionQuestion, originals: dict[str, str] | None = None) -> dict:
+    original = (originals if originals is not None else _original_texts(db, [row]))[row.question_id]
     return {"id": row.id, "level": row.level, "level_label": LEVEL_LABEL[row.level],
             "text": row.latest_text,
             "original": original if original != row.latest_text else None,
@@ -349,7 +403,7 @@ def list_sessions(course_id: str, db: Session = Depends(session), user: User = D
     require_course(db, course_id, user, "faculty")
     rows = (db.query(ClassSession).filter_by(course_id=course_id)
             .order_by(ClassSession.created_at.desc()).limit(50).all())
-    return {"items": [_public_session(db, s, faculty=True) for s in rows]}
+    return {"items": _public_sessions(db, rows, faculty=True)}
 
 
 @router.get("/sessions/{session_id}")
@@ -436,7 +490,7 @@ def _read_live(request, credentials, session_id, version, cursor, queued, *, acc
         if partial_page and not faculty and current.status == "OPEN" and page_data:
             current_slide, material = page_data
             if current_slide is not None and current_slide.version != version:
-                slide = _slide_metadata(current_slide, version)
+                slide = _student_slide(_slide_metadata(current_slide, version))
                 prepared = cached_live_page(material, slide["page"]) if slide.get("pdf") else None
                 if prepared and len(prepared) <= MAX_INLINE_PAGE_BYTES:
                     record_phase(request, "partial_page", started)
@@ -481,6 +535,18 @@ async def live_snapshot(session_id: str, request: Request, response: Response, v
                         media_type=LIVE_PAGE_CONTENT_TYPE,
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
     return result
+
+
+# Students receive only what the current page needs. Neighbour page numbers and
+# past transitions are faculty navigation data; text/image are the current
+# page's legacy non-PDF content.
+STUDENT_SLIDE_FIELDS = frozenset({"page", "total", "version", "sequence", "pdf", "text", "image"})
+
+
+def _student_slide(metadata):
+    if metadata is None:
+        return None
+    return {key: value for key, value in metadata.items() if key in STUDENT_SLIDE_FIELDS}
 
 
 def _slide_metadata(slide, version=""):
@@ -529,10 +595,13 @@ def _snapshot(db, current, user, faculty, version, cursor=None):
                 for x, y, count, rects in groups if x is not None
             ]
     snapshot = _slide_metadata(slide, version)
+    if not faculty:
+        snapshot = _student_slide(snapshot)
     if faculty and snapshot and snapshot.get("pdf"):
         snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
     transitions = []
-    if cursor and slide and cursor != slide.version:
+    # Past transitions let the presenter's view catch up; students follow the current page only.
+    if faculty and cursor and slide and cursor != slide.version:
         history = db.query(LiveTransition).filter_by(session_id=session_id)
         prior = history.filter_by(version=cursor).first()
         latest = history.filter_by(version=slide.version).first()
@@ -576,12 +645,15 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
               db: Session = Depends(session),
               credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     started = time.perf_counter()
-    _, current, _, slide, material = _live_reader(db, credentials, session_id, include_page=True)
+    _, current, faculty, slide, material = _live_reader(db, credentials, session_id, include_page=True)
     record_phase(request, "auth", started)
     started = time.perf_counter()
     if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
     historical = slide.version != version
+    if historical and not faculty:
+        # Students receive the page being shared now; a stale version refetches the latest state.
+        raise HTTPException(409, "This page is no longer being shared")
     if historical:
         slide = db.query(LiveTransition).filter_by(session_id=session_id, version=version).first()
         if not slide:
@@ -590,15 +662,34 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
     if not content.get("pdf"):
         raise HTTPException(404, "No PDF for this page")
     target = slide.page if page is None else page
-    allowed = (slide.page,) if historical else (slide.page, content.get("before"), content.get("after"))
+    if faculty and not historical:
+        allowed = (slide.page, content.get("before"), content.get("after"))
+    else:
+        allowed = (slide.page,)
     if target not in allowed:
         raise HTTPException(403, "This page is outside the active slide window")
     db.expunge(material)
     db.rollback()
     record_phase(request, "lookup", started)
     started = time.perf_counter()
+    # One cache read decides both the hit and the bytes returned: checking and
+    # then reading again could miss after an eviction and skip the re-check.
+    content = cached_live_page(material, target)
+    if content is not None:
+        record_phase(request, "pdf", started)
+        return _pdf_response(content)
     content = page_pdf(material, target)
     record_phase(request, "pdf", started)
+    if not faculty:
+        # Loading or splitting an uncached page can take long enough for the
+        # presenter to move on or for access to be revoked. Re-check before
+        # returning bytes; the cached path above answers within the same instant.
+        started = time.perf_counter()
+        _, current, _, slide, _ = _live_reader(db, credentials, session_id, include_page=True)
+        db.rollback()
+        if current.status == "CLOSED" or not slide or slide.version != version:
+            raise HTTPException(409, "This page is no longer being shared")
+        record_phase(request, "recheck", started)
     return _pdf_response(content)
 
 
@@ -608,27 +699,93 @@ def _pdf_response(content):
                              "Content-Disposition": 'attachment; filename="lesson.pdf"'})
 
 
-def _publisher(db, credentials, session_id, current=None):
-    claims = decode_token(credentials)
-    query = select(User, Member.role).select_from(User).where(User.id == claims["sub"])
-    if current is None:
-        query = (query.add_columns(ClassSession, Material)
-                 .outerjoin(ClassSession, ClassSession.id == session_id)
-                 .outerjoin(Member, (Member.course_id == ClassSession.course_id) & (Member.user_id == User.id))
-                 .outerjoin(Material, Material.id == ClassSession.material_id))
-    else:
-        query = query.outerjoin(Member, (Member.course_id == current.course_id) & (Member.user_id == User.id))
-    row = db.execute(query).one_or_none()
-    if row is None or not row[0].active:
+# ---------- live publish ----------
+# share_slide checks access with a read-only lookup, prepares the page, then
+# writes under a row lock on the session. PostgreSQL writes in two pipelined
+# round trips; other databases use the ORM. Both write paths re-run the same
+# rules below inside the lock, so a class closed or a permission revoked
+# after the lookup still blocks the write.
+
+def _require_publisher(claims, active, email, user_role, member_role):
+    """Identity and role rules shared by the lookup and both write paths."""
+    if not active:
         raise HTTPException(401, "Inactive or unknown user")
-    user, member_role, *session_material = row
+    if claims.get("scope") is not None or email.endswith("@join.question-up.local"):
+        raise HTTPException(403, "Session token cannot access this endpoint")
+    if member_role is None or (member_role != "faculty" and user_role != "admin"):
+        raise HTTPException(403, "Course access denied")
+
+
+def _require_open(status):
+    if status == "CLOSED":
+        raise HTTPException(409, "Class has ended")
+
+
+def _replayed_result(previous, snapshots):
+    """Return the stored result for a batch already written, or 409 if it was used for other pages.
+
+    `previous` holds the batch's (position, version, page, total, content) rows in position order.
+    """
+    if [item[2] for item in previous] != [page for page, _, _ in snapshots]:
+        raise HTTPException(409, "Batch identifier already used")
+    position, version, page, total, content = previous[-1]
+    return {"page": page, "total": total, "version": version, **json.loads(content), "sequence": position}
+
+
+def _require_expected_version(current_version, expected_version):
+    if expected_version is not None and (current_version is None or current_version != expected_version):
+        raise HTTPException(409, "The shared page changed. Refresh before publishing again.")
+
+
+def _plan_publish(batch_id, snapshots, last_position, initial):
+    """Transition rows to insert and the new live slide, from the locked current state.
+
+    `initial` is the current live slide as (version, page, total, content), or None.
+    The first publish also records the opening slide as position 1 so history starts there.
+    Returns (rows, slide): rows are (position, version, page, total, encoded content);
+    slide is (page, total, version, content dict, encoded content).
+    """
+    position = last_position or 0
+    rows = []
+    if position == 0 and initial is not None:
+        position = 1
+        version, page, total, content = initial
+        rows.append((1, version, page, total, content))
+    for offset, (page, total, content) in enumerate(snapshots):
+        version = f"{batch_id}:{offset}"
+        content = {**content, "sequence": position + offset + 1}
+        encoded = json.dumps(content, ensure_ascii=False)
+        rows.append((position + offset + 1, version, page, total, encoded))
+    return rows, (page, total, version, content, encoded)
+
+
+def _publish_response(slide):
+    page, total, version, content, _ = slide
+    return {"page": page, "total": total, "version": version, **content}
+
+
+def _publisher(db, credentials, session_id):
+    """Read-only access lookup before the page is prepared; the write re-checks under lock."""
+    claims = decode_token(credentials)
+    row = db.execute(
+        select(User, Member.role, ClassSession, Material)
+        .select_from(User)
+        .outerjoin(ClassSession, ClassSession.id == session_id)
+        .outerjoin(Member, (Member.course_id == ClassSession.course_id) & (Member.user_id == User.id))
+        .outerjoin(Material, Material.id == ClassSession.material_id)
+        .where(User.id == claims["sub"])
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(401, "Inactive or unknown user")
+    user, member_role, current, material = row
+    if not user.active:
+        raise HTTPException(401, "Inactive or unknown user")
     if claims.get("scope") is not None or user.email.endswith("@join.question-up.local"):
         raise HTTPException(403, "Session token cannot access this endpoint")
-    if session_material and session_material[0] is None:
+    if current is None:
         raise HTTPException(404, "Session not found")
-    if member_role is None or (member_role != "faculty" and user.role != "admin"):
-        raise HTTPException(403, "Course access denied")
-    return session_material
+    _require_publisher(claims, user.active, user.email, user.role, member_role)
+    return current, material
 
 
 def _notify_published_page(session_id, material, page, prepared):
@@ -653,6 +810,8 @@ join users u on u.id = %s
 left join members m on m.course_id = cs.course_id and m.user_id = u.id
 left join live_slides ls on ls.session_id = cs.id
 where cs.id = %s"""
+_PUBLISH_REPLAYED = ("select position, version, page, total, content from live_transitions "
+                     "where session_id = %s and left(version, length(%s)) = %s order by position")
 _TRANSITION_INSERT = ("insert into live_transitions (session_id, position, version, page, total, content) "
                       "values (%s, %s, %s, %s, %s, %s)")
 
@@ -660,8 +819,8 @@ _TRANSITION_INSERT = ("insert into live_transitions (session_id, position, versi
 def _publish_pipelined(session_id, claims, batch_id, snapshots, expected_version):
     """PostgreSQL publish in two round trips: lock+read, then write+commit.
 
-    Same checks, ordering and lock as the ORM path below; the lock statement is
-    queued before the read so the read's snapshot follows any earlier publisher.
+    The lock statement is queued before the read so the read's snapshot
+    follows any earlier publisher.
     """
     import psycopg
 
@@ -682,21 +841,24 @@ def _publish_pipelined(session_id, claims, batch_id, snapshots, expected_version
                 if lock.fetchone() is None:
                     raise HTTPException(404, "Session not found")
                 row = read.fetchone()
-                result = _publish_checks(conn, session_id, claims, batch_id, snapshots, expected_version, row)
-                if result is not None:
+                if row is None:
+                    raise HTTPException(401, "Inactive or unknown user")
+                (status, active, email, user_role, member_role,
+                 page0, total0, version0, content0, last_position, replayed) = row
+                _require_publisher(claims, active, email, user_role, member_role)
+                _require_open(status)
+                if replayed:
+                    previous = conn.execute(_PUBLISH_REPLAYED, (session_id, prefix, prefix)).fetchall()
+                    result = _replayed_result(previous, snapshots)
                     conn.execute("rollback")
                     return result, False
-                (status, _, _, _, _, page0, total0, version0, content0, position, _) = row
-                position = position or 0
-                if position == 0 and version0 is not None:
-                    position = 1
-                    conn.execute(_TRANSITION_INSERT, (session_id, 1, version0, page0, total0, content0))
-                for offset, (page, total, content) in enumerate(snapshots):
-                    version = f"{batch_id}:{offset}"
-                    content = {**content, "sequence": position + offset + 1}
-                    encoded = json.dumps(content, ensure_ascii=False)
-                    conn.execute(_TRANSITION_INSERT, (session_id, position + offset + 1, version, page, total, encoded))
-                if version0 is None:
+                _require_expected_version(version0, expected_version)
+                initial = None if version0 is None else (version0, page0, total0, content0)
+                rows, slide = _plan_publish(batch_id, snapshots, last_position, initial)
+                for position, version, page, total, content in rows:
+                    conn.execute(_TRANSITION_INSERT, (session_id, position, version, page, total, content))
+                page, total, version, _, encoded = slide
+                if initial is None:
                     conn.execute("insert into live_slides (session_id, page, total, version, content) "
                                  "values (%s, %s, %s, %s, %s)", (session_id, page, total, version, encoded))
                 else:
@@ -704,7 +866,7 @@ def _publish_pipelined(session_id, claims, batch_id, snapshots, expected_version
                                  "where session_id = %s", (page, total, version, encoded, session_id))
                 sent_writes = True
                 conn.execute("commit")
-            return {"page": page, "total": total, "version": version, **content}, True
+            return _publish_response(slide), True
         except psycopg.OperationalError:
             # A pooled connection the server dropped fails before any write is sent.
             raw.invalidate()
@@ -720,58 +882,8 @@ def _publish_pipelined(session_id, claims, batch_id, snapshots, expected_version
             raw.close()
 
 
-def _publish_checks(conn, session_id, claims, batch_id, snapshots, expected_version, row):
-    if row is None:
-        raise HTTPException(401, "Inactive or unknown user")
-    status, active, email, user_role, member_role, _, _, version0, _, _, replayed = row
-    if not active:
-        raise HTTPException(401, "Inactive or unknown user")
-    if claims.get("scope") is not None or email.endswith("@join.question-up.local"):
-        raise HTTPException(403, "Session token cannot access this endpoint")
-    if member_role is None or (member_role != "faculty" and user_role != "admin"):
-        raise HTTPException(403, "Course access denied")
-    if status == "CLOSED":
-        raise HTTPException(409, "Class has ended")
-    if replayed:
-        prefix = batch_id + ":"
-        previous = conn.execute(
-            "select position, version, page, total, content from live_transitions "
-            "where session_id = %s and left(version, length(%s)) = %s order by position",
-            (session_id, prefix, prefix)).fetchall()
-        if [item[2] for item in previous] != [page for page, _, _ in snapshots]:
-            raise HTTPException(409, "Batch identifier already used")
-        position, version, page, total, content = previous[-1]
-        return {"page": page, "total": total, "version": version, **json.loads(content), "sequence": position}
-    if expected_version is not None and (version0 is None or version0 != expected_version):
-        raise HTTPException(409, "The shared page changed. Refresh before publishing again.")
-    return None
-
-
-@router.put("/sessions/{session_id}/live")
-def share_slide(session_id: str, data: ShareSlide, request: Request,
-                credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
-    started = time.perf_counter()
-    with LiveReadSession() as db:
-        current, material = _publisher(db, credentials, session_id)
-        if current.status == "CLOSED":
-            raise HTTPException(409, "Class has ended")
-        db.expunge(material)
-    record_phase(request, "lookup", started)
-    started = time.perf_counter()
-    snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
-    record_phase(request, "prepare", started)
-    last_page, _, last_content = snapshots[-1]
-    # Students fetch the page bytes from memory the moment they are notified.
-    prepared = prepare_shared_page(material, last_page, last_content.get("before"), last_content.get("after"))
-    started = time.perf_counter()
-    batch_id = data.batch_id or uid()
-    claims = decode_token(credentials)
-    if publish_engine.dialect.name == "postgresql":
-        result, wrote = _publish_pipelined(session_id, claims, batch_id, snapshots, data.expected_version)
-        record_phase(request, "write", started)
-        if wrote:
-            _notify_published_page(session_id, material, last_page, prepared)
-        return result
+def _publish_orm(session_id, claims, batch_id, snapshots, expected_version):
+    """Publish through the ORM (SQLite and any non-PostgreSQL database)."""
     with PublishSession() as db:
         transitions = select(LiveTransition).where(LiveTransition.session_id == ClassSession.id)
         last_position = transitions.with_only_columns(func.max(LiveTransition.position)).scalar_subquery()
@@ -795,56 +907,63 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
         if row is None:
             raise HTTPException(401, "Inactive or unknown user")
         current, user, member_role, initial, position, replayed = row
-        if not user.active:
-            raise HTTPException(401, "Inactive or unknown user")
-        if claims.get("scope") is not None or user.email.endswith("@join.question-up.local"):
-            raise HTTPException(403, "Session token cannot access this endpoint")
-        if member_role is None or (member_role != "faculty" and user.role != "admin"):
-            raise HTTPException(403, "Course access denied")
-        if current.status == "CLOSED":
-            raise HTTPException(409, "Class has ended")
+        _require_publisher(claims, user.active, user.email, user.role, member_role)
+        _require_open(current.status)
         if replayed:
             previous = (db.query(LiveTransition).filter_by(session_id=session_id)
                         .filter(LiveTransition.version.startswith(batch_id + ":"))
                         .order_by(LiveTransition.position).all())
-            if [item.page for item in previous] != [page for page, _, _ in snapshots]:
-                raise HTTPException(409, "Batch identifier already used")
-            last = previous[-1]
-            record_phase(request, "write", started)
-            return {"page": last.page, "total": last.total, "version": last.version,
-                    **json.loads(last.content), "sequence": last.position}
-        position = position or 0
-        if data.expected_version is not None and (initial is None or initial.version != data.expected_version):
-            raise HTTPException(409, "The shared page changed. Refresh before publishing again.")
-        if position == 0 and initial:
-            position = 1
-            db.add(LiveTransition(session_id=session_id, position=position, version=initial.version,
-                                  page=initial.page, total=initial.total, content=initial.content))
-        for offset, (page, total, content) in enumerate(snapshots):
-            version = f"{batch_id}:{offset}"
-            sequence = position + offset + 1
-            content = {**content, "sequence": sequence}
-            encoded = json.dumps(content, ensure_ascii=False)
-            db.add(LiveTransition(session_id=session_id, position=sequence,
-                                  page=page, total=total, version=version, content=encoded))
+            return _replayed_result([(item.position, item.version, item.page, item.total, item.content)
+                                     for item in previous], snapshots), False
+        _require_expected_version(initial.version if initial else None, expected_version)
+        state = None if initial is None else (initial.version, initial.page, initial.total, initial.content)
+        rows, slide = _plan_publish(batch_id, snapshots, position, state)
+        for sequence, version, page, total, content in rows:
+            db.add(LiveTransition(session_id=session_id, position=sequence, version=version,
+                                  page=page, total=total, content=content))
+        page, total, version, _, encoded = slide
         if initial is None:
             db.add(LiveSlide(session_id=session_id, page=page, total=total, version=version, content=encoded))
         else:
             initial.page, initial.total, initial.version, initial.content = page, total, version, encoded
         db.commit()
+    return _publish_response(slide), True
+
+
+@router.put("/sessions/{session_id}/live")
+def share_slide(session_id: str, data: ShareSlide, request: Request,
+                credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
+    started = time.perf_counter()
+    with LiveReadSession() as db:
+        current, material = _publisher(db, credentials, session_id)
+        _require_open(current.status)
+        db.expunge(material)
+    record_phase(request, "lookup", started)
+    started = time.perf_counter()
+    snapshots = [(page, *build_snapshot(material, page)) for page in (data.pages or [data.page])]
+    record_phase(request, "prepare", started)
+    last_page, _, last_content = snapshots[-1]
+    # Students fetch the page bytes from memory the moment they are notified.
+    prepared = prepare_shared_page(material, last_page, last_content.get("before"), last_content.get("after"))
+    started = time.perf_counter()
+    batch_id = data.batch_id or uid()
+    claims = decode_token(credentials)
+    write = _publish_pipelined if publish_engine.dialect.name == "postgresql" else _publish_orm
+    result, wrote = write(session_id, claims, batch_id, snapshots, data.expected_version)
     record_phase(request, "write", started)
-    _notify_published_page(session_id, material, last_page, prepared)
-    return {"page": page, "total": total, "version": version, **content}
+    if wrote:
+        _notify_published_page(session_id, material, last_page, prepared)
+    return result
 
 
 @router.get("/sessions/{session_id}/board")
-def board(session_id: str, level: Literal["all", "shallow", "mid", "deep"] = "all",
+def board(session_id: str, level: Literal["all", "shallow", "mid", "deep", "unassessed"] = "all",
           include_hidden: bool = False, db: Session = Depends(session), user: User = Depends(actor)):
     s = _faculty_session(db, session_id, user)
     q = db.query(SessionQuestion).filter_by(session_id=s.id, submitted=True)
     rows = q.order_by(SessionQuestion.submitted_at, SessionQuestion.id).all()
-    counts = {"all": 0, "shallow": 0, "mid": 0, "deep": 0}
-    items = []
+    counts = {"all": 0, "shallow": 0, "mid": 0, "deep": 0, UNASSESSED: 0}
+    selected = []
     for r in rows:
         if r.hidden and not include_hidden:
             continue
@@ -852,7 +971,9 @@ def board(session_id: str, level: Literal["all", "shallow", "mid", "deep"] = "al
             counts["all"] += 1
             counts[r.level] += 1
         if level == "all" or r.level == level:
-            items.append(_board_item(db, r))
+            selected.append(r)
+    originals = _original_texts(db, selected)
+    items = [_board_item(db, r, originals) for r in selected]
     return {"session": _public_session(db, s, faculty=True), "counts": counts, "items": items}
 
 
@@ -942,8 +1063,9 @@ def export(session_id: str, db: Session = Depends(session), user: User = Depends
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["제출 시각", "질문 수준", "처음 질문", "다시 쓴 질문", "화면에 띄움"])
+    originals = _original_texts(db, rows)
     for r in rows:
-        original = _original_text(db, r)
+        original = originals[r.question_id]
         w.writerow([_iso(r.submitted_at), LEVEL_LABEL[r.level], _csv_cell(original),
                     _csv_cell(r.latest_text) if r.latest_text != original else "",
                     "예" if r.projected_at else ""])
@@ -977,7 +1099,8 @@ def join(data: JoinRequest, request: Request, response: Response, db: Session = 
     response.headers["Cache-Control"] = "no-store"
     return {"access_token": issue_token(student.id, minutes=STUDENT_TOKEN_MINUTES, session_id=s.id),
             "session": _public_session(db, s),
-            "initial_live": {"status": s.status, "slide": _slide_metadata(db.get(LiveSlide, s.id)), "index": []}}
+            "initial_live": {"status": s.status, "slide": _student_slide(_slide_metadata(db.get(LiveSlide, s.id))),
+                             "index": []}}
 
 
 @router.put("/sessions/{session_id}/live/confusion")
@@ -1093,8 +1216,9 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
     pages = dict(db.query(QuestionSlide.question_id, QuestionSlide.page).join(
         SessionQuestion, SessionQuestion.id == QuestionSlide.question_id
     ).filter(SessionQuestion.session_id == session_id, SessionQuestion.student_id == user.id).all())
+    originals = _original_texts(db, rows)
     return {"session": _public_session(db, s),
             "items": [{"id": r.id, "slide_page": pages.get(r.id), "level": r.level, "level_label": LEVEL_LABEL[r.level],
-                       "text": r.latest_text, "original": _original_text(db, r),
+                       "text": r.latest_text, "original": originals[r.question_id],
                        "submitted": r.submitted, "submitted_at": _iso(r.submitted_at),
                        "coaching": _student_coaching(json.loads(r.latest_coaching_json))} for r in rows]}
