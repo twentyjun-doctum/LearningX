@@ -33,6 +33,20 @@ def _modules():
     from runtime.gateway import OpenAICompatibleGateway
     return approve,verify,block_digest,load_blocks,run_coaching,OpenAICompatibleGateway
 
+def model_gateway():
+    """The configured model gateway, or None when no model is configured.
+
+    Callers must keep a deterministic path for None: a missing model is a
+    normal deployment state (guest classes, unconfigured pilots).
+    """
+    try:
+        *_,Gateway=_modules()
+        return Gateway()
+    except Exception as exc:
+        if exc.__class__.__name__=="GatewayFailure" or isinstance(exc,HTTPException):
+            return None
+        raise
+
 def ingest(source:Path, out:Path):
     p=root()
     out.mkdir(parents=True,exist_ok=False)
