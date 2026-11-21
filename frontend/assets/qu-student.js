@@ -6,6 +6,20 @@
   const { el, client, LEVEL, plant } = window.QU;
   const $ = (id) => document.getElementById(id);
 
+  document.addEventListener('copy', event => {
+    if (event.target?.closest?.('input, textarea') || event.target?.isContentEditable) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+    const protectedNodes = [...document.querySelectorAll('#student-slide [data-copy-protected]')];
+    for (let i = 0; i < selection.rangeCount; i++) {
+      const range = selection.getRangeAt(i);
+      if (protectedNodes.some(node => range.intersectsNode(node))) {
+        event.preventDefault();
+        return;
+      }
+    }
+  }, true);
+
   let token = null;
   const st = {
     session: null,      // {id, course_title, status}

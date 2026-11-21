@@ -200,7 +200,13 @@
       picked = {rects, x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
         y: clamp((hit.top + hit.height / 2 - area.top) / area.height),
         quote: range.toString().trim().slice(0, 240)};
-      if (feedback) feedback.textContent = picked.quote ? '선택: “' + picked.quote + '”' : '';
+      if (feedback) {
+        if (picked.quote) {
+          feedback.replaceChildren(el('span', {'data-copy-protected': true, text: '선택: “' + picked.quote + '”'}));
+        } else {
+          feedback.replaceChildren();
+        }
+      }
       if (!drag) showSelectionActions(hit);
       paintIndex();
     }
@@ -267,7 +273,7 @@
         }, el('span', {class: 'live-tab-label', text: (number + 1) + ' · ' + LEVEL[item.level]}),
         el('span', {class: 'live-tab-number', text: number + 1, 'aria-hidden': 'true'}),
         el('span', {class: 'live-tab-preview'},
-          item.anchor?.quote ? el('small', {text: '“' + item.anchor.quote + '”'}) : null,
+          item.anchor?.quote ? el('small', {'data-copy-protected': true, text: '“' + item.anchor.quote + '”'}) : null,
           el('span', {text: item.text || LEVEL[item.level] + ' 질문'})))));
         if (strip) {
           const groups = new Map();
