@@ -26,7 +26,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import DBAPIError
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, and_, case, func, select, true
 from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
 from . import engine_adapter as nit
@@ -249,32 +249,78 @@ def _iso(dt):
 
 
 def _public_session(db, s: ClassSession, faculty=False) -> dict:
-    c = db.get(Course, s.course_id)
-    data = {"id": s.id, "course_id": s.course_id, "course_title": c.title if c else "",
-            "status": s.status, "created_at": _iso(s.created_at), "closed_at": _iso(s.closed_at)}
+    return _public_sessions(db, [s], faculty)[0]
+
+
+def _public_sessions(db, sessions, faculty=False) -> list[dict]:
+    """Session summaries with a fixed number of queries, however many questions exist."""
+    if not sessions:
+        return []
+    ids = [s.id for s in sessions]
+    titles = dict(db.query(Course.id, Course.title)
+                  .filter(Course.id.in_({s.course_id for s in sessions})).all())
+    stats = {}
     if faculty:
-        rows = db.query(SessionQuestion).filter_by(session_id=s.id).all()
-        submitted = [r for r in rows if r.submitted]
-        data.update({
-            "join_code": s.join_code if s.status != "CLOSED" else None,
-            "material_id": s.material_id,
-            "participants": db.query(SessionParticipant).filter_by(session_id=s.id).count(),
-            "questions_submitted": len(submitted),
-            "questions_deep": sum(1 for r in submitted if r.level == "deep"),
-            "questions_revised": sum(1 for r in submitted if r.latest_text != _original_text(db, r)),
-            "questions_projected": sum(1 for r in submitted if r.projected_at),
-            "projected_id": s.projected_id,
-        })
-    return data
+        participants = dict(db.query(SessionParticipant.session_id, func.count())
+                            .filter(SessionParticipant.session_id.in_(ids))
+                            .group_by(SessionParticipant.session_id).all())
+        submitted = SessionQuestion.submitted.is_(True)
+
+        def submitted_where(condition):
+            return func.coalesce(func.sum(case((and_(submitted, condition), 1), else_=0)), 0)
+
+        # A question whose original row is missing counts as unrevised, as before.
+        rows = (db.query(SessionQuestion.session_id,
+                         submitted_where(true()),
+                         submitted_where(SessionQuestion.level == "deep"),
+                         submitted_where(and_(Question.id.isnot(None),
+                                              SessionQuestion.latest_text != Question.text)),
+                         submitted_where(SessionQuestion.projected_at.isnot(None)))
+                .outerjoin(Question, Question.id == SessionQuestion.question_id)
+                .filter(SessionQuestion.session_id.in_(ids))
+                .group_by(SessionQuestion.session_id).all())
+        counts = {row[0]: [int(value) for value in row[1:]] for row in rows}
+        for session_id in ids:
+            total, deep, revised, projected = counts.get(session_id, (0, 0, 0, 0))
+            stats[session_id] = {"participants": participants.get(session_id, 0),
+                                 "questions_submitted": total, "questions_deep": deep,
+                                 "questions_revised": revised, "questions_projected": projected}
+    result = []
+    for s in sessions:
+        data = {"id": s.id, "course_id": s.course_id, "course_title": titles.get(s.course_id, ""),
+                "status": s.status, "created_at": _iso(s.created_at), "closed_at": _iso(s.closed_at)}
+        if faculty:
+            item = stats[s.id]
+            data.update({
+                "join_code": s.join_code if s.status != "CLOSED" else None,
+                "material_id": s.material_id,
+                "participants": item["participants"],
+                "questions_submitted": item["questions_submitted"],
+                "questions_deep": item["questions_deep"],
+                "questions_revised": item["questions_revised"],
+                "questions_projected": item["questions_projected"],
+                "projected_id": s.projected_id,
+            })
+        result.append(data)
+    return result
 
 
 def _original_text(db, row: SessionQuestion) -> str:
-    q = db.get(Question, row.question_id)
-    return q.text if q else row.latest_text
+    return _original_texts(db, [row])[row.question_id]
 
 
-def _board_item(db, row: SessionQuestion) -> dict:
-    original = _original_text(db, row)
+def _original_texts(db, rows) -> dict[str, str]:
+    """First-asked text for each question, read in bounded batches instead of per row."""
+    wanted = list({row.question_id for row in rows})
+    found = {}
+    for start in range(0, len(wanted), 500):
+        found.update(db.query(Question.id, Question.text)
+                     .filter(Question.id.in_(wanted[start:start + 500])).all())
+    return {row.question_id: found.get(row.question_id, row.latest_text) for row in rows}
+
+
+def _board_item(db, row: SessionQuestion, originals: dict[str, str] | None = None) -> dict:
+    original = (originals if originals is not None else _original_texts(db, [row]))[row.question_id]
     return {"id": row.id, "level": row.level, "level_label": LEVEL_LABEL[row.level],
             "text": row.latest_text,
             "original": original if original != row.latest_text else None,
@@ -343,7 +389,7 @@ def list_sessions(course_id: str, db: Session = Depends(session), user: User = D
     require_course(db, course_id, user, "faculty")
     rows = (db.query(ClassSession).filter_by(course_id=course_id)
             .order_by(ClassSession.created_at.desc()).limit(50).all())
-    return {"items": [_public_session(db, s, faculty=True) for s in rows]}
+    return {"items": _public_sessions(db, rows, faculty=True)}
 
 
 @router.get("/sessions/{session_id}")
@@ -838,7 +884,7 @@ def board(session_id: str, level: Literal["all", "shallow", "mid", "deep"] = "al
     q = db.query(SessionQuestion).filter_by(session_id=s.id, submitted=True)
     rows = q.order_by(SessionQuestion.submitted_at, SessionQuestion.id).all()
     counts = {"all": 0, "shallow": 0, "mid": 0, "deep": 0}
-    items = []
+    selected = []
     for r in rows:
         if r.hidden and not include_hidden:
             continue
@@ -846,7 +892,9 @@ def board(session_id: str, level: Literal["all", "shallow", "mid", "deep"] = "al
             counts["all"] += 1
             counts[r.level] += 1
         if level == "all" or r.level == level:
-            items.append(_board_item(db, r))
+            selected.append(r)
+    originals = _original_texts(db, selected)
+    items = [_board_item(db, r, originals) for r in selected]
     return {"session": _public_session(db, s, faculty=True), "counts": counts, "items": items}
 
 
@@ -936,8 +984,9 @@ def export(session_id: str, db: Session = Depends(session), user: User = Depends
     buf = io.StringIO()
     w = csv.writer(buf)
     w.writerow(["제출 시각", "질문 수준", "처음 질문", "다시 쓴 질문", "화면에 띄움"])
+    originals = _original_texts(db, rows)
     for r in rows:
-        original = _original_text(db, r)
+        original = originals[r.question_id]
         w.writerow([_iso(r.submitted_at), LEVEL_LABEL[r.level], _csv_cell(original),
                     _csv_cell(r.latest_text) if r.latest_text != original else "",
                     "예" if r.projected_at else ""])
@@ -1087,8 +1136,9 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
     pages = dict(db.query(QuestionSlide.question_id, QuestionSlide.page).join(
         SessionQuestion, SessionQuestion.id == QuestionSlide.question_id
     ).filter(SessionQuestion.session_id == session_id, SessionQuestion.student_id == user.id).all())
+    originals = _original_texts(db, rows)
     return {"session": _public_session(db, s),
             "items": [{"id": r.id, "slide_page": pages.get(r.id), "level": r.level, "level_label": LEVEL_LABEL[r.level],
-                       "text": r.latest_text, "original": _original_text(db, r),
+                       "text": r.latest_text, "original": originals[r.question_id],
                        "submitted": r.submitted, "submitted_at": _iso(r.submitted_at),
                        "coaching": _student_coaching(json.loads(r.latest_coaching_json))} for r in rows]}
