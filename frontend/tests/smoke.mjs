@@ -40,11 +40,16 @@ for(const html of [entry,teacher,student]){
  assert.doesNotMatch(html,/\sstyle=/,'CSP forbids inline style attributes');
  assert.doesNotMatch(html,/<script>(?!<\/script>)|<script(?![^>]*\bsrc=)[^>]*>/,'CSP forbids inline scripts');
 }
-for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu-plant.js']){
+for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu-plant.js','qu-live.js','qu-live-protocol.js']){
  const src=fs.readFileSync(path.join(root,'assets',file),'utf8');
  assert.doesNotMatch(src,/localStorage|sessionStorage|document\.cookie|indexedDB/,`${file} must keep tokens in memory only`);
  assert.doesNotMatch(src,/innerHTML|insertAdjacentHTML|eval\(|new Function/,`${file} must not inject HTML or code`);
  assert.doesNotMatch(src,/setAttribute\(\s*['"]style/,`${file} must not set style attributes (CSP)`);
+}
+for(const html of [teacher,student]){
+ const order=[...html.matchAll(/<script src="assets\/([^"]+)"/g)].map(m=>m[1]);
+ assert.ok(order.indexOf('qu-api.js')<order.indexOf('qu-live-protocol.js')&&order.indexOf('qu-live-protocol.js')<order.indexOf('qu-live.js'),
+  'qu-live-protocol.js must load after qu-api.js and before qu-live.js: '+order.join(', '));
 }
 const quApi=fs.readFileSync(path.join(root,'assets/qu-api.js'),'utf8');
 assert.match(quApi,/credentials: 'omit'/);
@@ -75,7 +80,39 @@ for (const [hostname, query, expected] of [
 console.log('OK: API origin confinement protects invite codes and tokens');
 
 {
+ // A question whose judgment failed has no level: neutral label, own filter, no plant growth.
+ const ctx = vm.createContext({window:{}, location:{hostname:'localhost', search:''}, URL, URLSearchParams,
+  AbortController, setTimeout, clearTimeout, fetch: async () => { throw new Error('offline'); }, document:{}, Node:class {}});
+ vm.runInContext(quApi, ctx);
+ const {levelText} = ctx.window.QU;
+ assert.equal(levelText('unassessed'), '수준 판정 보류');
+ assert.equal(levelText('deep'), '깊은 질문');
+ assert.match(teacher, /data-level="unassessed"[^>]*>판정 보류 <span data-count="unassessed">/);
+ assert.ok(quTeacher.includes("['all', 'deep', 'mid', 'shallow', 'unassessed']"), 'teacher paints the unassessed count');
+ const start = quStudent.indexOf('  function renderCoaching(level, c) {');
+ const end = quStudent.indexOf('\n  function ', start + 10);
+ const stages = [];
+ const messages = [];
+ const el = (tag, attrs = {}, ...kids) => ({tag, attrs, kids, append(...more){ kids.push(...more); }});
+ const student = vm.createContext({el, levelText, LEVEL: ctx.window.QU.LEVEL, plant: stage => ({plant: stage}),
+  RANK: {seed: 0, shallow: 1, mid: 2, deep: 3}, GROWTH: {}, TEMPLATES: {}, st: {stage: 'mid'},
+  setStage: stage => stages.push(stage), coachMsg: (...parts) => messages.push(parts),
+  $: () => ({append(){}}), scrollThread(){}, submitCurrent(){}, updateComposer(){}, useTemplate(){},
+  document: {createTextNode: text => ({text})}});
+ vm.runInContext(quStudent.slice(start, end) + '\nthis.renderCoaching = renderCoaching;', student);
+ student.renderCoaching('unassessed', {follow_up_question: '어떤 기준으로 구별할 수 있을까요?', feedback: '고정 문구'});
+ assert.deepEqual(stages, [], 'an unassessed answer never moves the plant');
+ const texts = JSON.stringify(messages);
+ assert.ok(texts.includes('수준 판정 보류') && texts.includes('어떤 기준으로 구별할 수 있을까요?'));
+ assert.ok(!texts.includes('얕은') && !texts.includes('중간') && !texts.includes('깊은'), 'no level words for an unassessed answer');
+ student.renderCoaching('deep', {follow_up_question: '다른 해석은 무엇일까요?'});
+ assert.deepEqual(stages, ['deep'], 'validated levels still move the plant');
+ console.log('OK: unassessed questions show no level, keep their own filter and never grow the plant');
+}
+
+{
  const liveSource = fs.readFileSync(path.join(root,'assets/qu-live.js'),'utf8');
+ const protocolSource = fs.readFileSync(path.join(root,'assets/qu-live-protocol.js'),'utf8');
  const stubbed = liveSource.replace("import(pdfBase + 'build/pdf.min.mjs')", 'loadFixtureRenderer()');
  assert.notEqual(stubbed, liveSource);
  function node(tag, attrs = {}, ...children) {
@@ -170,7 +207,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   window:mockWindow,
   document:{addEventListener(){},removeEventListener(){},documentElement:{classList:{add:x=>htmlClasses.add(x),remove:x=>htmlClasses.delete(x)}}},
   innerHeight:720, devicePixelRatio:1,
-  URLSearchParams,TextDecoder,setTimeout,clearTimeout,performance:{now:()=>clock+=400},
+  URLSearchParams,TextDecoder,setTimeout,clearTimeout,AbortController,performance:{now:()=>clock+=400},
   loadFixtureRenderer: async ()=>({
    GlobalWorkerOptions:{},TextLayer:class {async render(){}},
    PDFWorker:class {
@@ -182,6 +219,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
    },
   }),
  });
+ vm.runInContext(protocolSource,ctx);
  vm.runInContext(stubbed,ctx);
  const view = ctx.window.QU.createLiveView({api,session:'fixture',panel,
   initial:{status:'OPEN',slide:latest,index:[]},onState(){},onQuestion(){}});
@@ -265,6 +303,199 @@ console.log('OK: API origin confinement protects invite codes and tokens');
   view.stop();
  }
  console.log('OK: live slide skips stale transitions and retries the latest page');
+}
+
+{
+ // Student page errors: 409 means the shared page moved on (fetch the latest
+ // state, no retry of the stale page); 401/403 means access ended (stop and
+ // clear, and a slow render finishing later must not repaint the lesson).
+ const liveSource = fs.readFileSync(path.join(root,'assets/qu-live.js'),'utf8')
+  .replace("import(pdfBase + 'build/pdf.min.mjs')", 'loadFixtureRenderer()');
+ function node(attrs = {}) {
+  return {children:[], classes:(attrs.class || '').split(' '), style:{setProperty(){}}, clientWidth:640,
+   textContent:attrs.text ?? '', classList:{add(){}, remove(){}, contains:() => false}, contains:() => false,
+   append(...nodes){for (const n of nodes.filter(Boolean)) { n.parent = this; this.children.push(n); }},
+   replaceChildren(...nodes){this.children=[]; this.append(...nodes);},
+   remove(){this.parent.children=this.parent.children.filter(n=>n!==this);},
+   querySelector(selector){
+    for (const n of this.children) {
+     if (n.classes.includes(selector.slice(1))) return n;
+     const inner = n.querySelector(selector);
+     if (inner) return inner;
+    }
+    return null;
+   }, addEventListener(){}, removeEventListener(){}};
+ }
+ const error = status => Object.assign(new Error('fixture HTTP ' + status), {status});
+ const slide = (page, version) => ({page, version, total:9, pdf:true});
+ const page = {getViewport:({scale})=>({width:100*scale,height:100*scale,scale}),
+  render:()=>({promise:Promise.resolve()}), streamTextContent(){}};
+ async function until(condition, label) {
+  const deadline = Date.now() + 1500;
+  while (!condition() && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.ok(condition(), label);
+ }
+ function harness(pageResponse, {parkMs = 40} = {}) {
+  const parts = new Map();
+  const panel = node();
+  panel.querySelector = key => {
+   if (key === '[data-live-confused]' || key === '[data-live-ask]') return null;
+   if (!parts.has(key)) parts.set(key, node());
+   return parts.get(key);
+  };
+  panel.getBoundingClientRect = () => ({left:0, top:0, width:640, height:480});
+  const state = {latest: slide(1, 'v1'), polls: [], pages: [], cancelled: 0, panel};
+  const api = async (pathname, {readBody, signal} = {}) => {
+   const url = new URL(pathname, 'https://fixture.local');
+   if (!url.pathname.includes('/page/')) {
+    state.polls.push(Object.fromEntries(url.searchParams));
+    // A poll with `after` parks until its timeout: this server never wakes it,
+    // as when the presenter's change reached another API instance.
+    await new Promise((resolve, reject) => {
+     const wait = setTimeout(resolve, url.searchParams.has('after') ? parkMs : 4);
+     signal?.addEventListener('abort', () => {
+      clearTimeout(wait);
+      state.cancelled += 1;
+      reject(Object.assign(new Error('cancelled'), {status:0, detail:'cancelled'}));
+     });
+    });
+    return {status:'OPEN', slide:state.latest, index:[], revision:'r-' + state.latest.version};
+   }
+   const version = url.pathname.split('/').pop();
+   state.pages.push(version);
+   return pageResponse(version, readBody, state);
+  };
+  const ctx = vm.createContext({
+   window:{QU:{el:(tag, attrs, ...kids) => { const n = node(attrs); n.append(...kids); return n; }, LEVEL:{}},
+    scrollX:0, scrollY:0, getSelection:() => null, addEventListener(){}, removeEventListener(){}},
+   document:{addEventListener(){}, removeEventListener(){}, documentElement:{classList:{add(){}, remove(){}}}},
+   innerHeight:720, devicePixelRatio:1, URLSearchParams, TextDecoder, setTimeout, clearTimeout, AbortController,
+   loadFixtureRenderer: async () => ({GlobalWorkerOptions:{}, TextLayer:class {async render(){}},
+    PDFWorker:class { constructor(){ this.promise = Promise.resolve(); } destroy(){} },
+    getDocument:() => ({promise:Promise.resolve({getPage:async () => page, destroy:async () => {}, numPages:1})})}),
+  });
+  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-live-protocol.js'),'utf8'), ctx);
+  vm.runInContext(liveSource, ctx);
+  state.view = ctx.window.QU.createLiveView({api, session:'fixture', panel,
+   initial:{status:'OPEN', slide:state.latest, index:[]}, onState(){}, onQuestion(){}});
+  state.content = panel.querySelector('[data-live-content]');
+  state.status = panel.querySelector('[data-live-status]');
+  return state;
+ }
+ const pdfBody = readBody => readBody({headers:new Headers(), arrayBuffer:async () => new ArrayBuffer(10)});
+
+ // 409: the presenter moved on before the student's page request was answered.
+ const moved = harness((version, readBody, state) => {
+  if (version === 'v1') { state.latest = slide(2, 'v2'); throw error(409); }
+  return pdfBody(readBody);
+ });
+ try {
+  await until(() => moved.view.page() === 2, 'student shows the latest page after a 409');
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(moved.pages.filter(v => v === 'v1').length, 1, 'the stale page is not retried');
+  assert.ok(moved.polls.some((poll, i) => i > 0 && !('after' in poll)), 'a 409 polls the latest state without waiting');
+ } finally { moved.view.stop(); }
+
+ // 409 while a poll is already parked on the old revision and is never woken.
+ let staleAt;
+ const parked = harness(async (version, readBody, state) => {
+  if (version === 'v1') {
+   await until(() => state.polls.some(poll => 'after' in poll), 'a poll parks before the page answers');
+   state.latest = slide(2, 'v2');
+   staleAt = performance.now();
+   throw error(409);
+  }
+  return pdfBody(readBody);
+ }, {parkMs: 1000});
+ try {
+  await until(() => parked.view.page() === 2, 'latest page shown after a 409 during a parked poll');
+  const elapsed = performance.now() - staleAt;
+  assert.equal(parked.cancelled, 1, 'the parked poll is cancelled');
+  assert.ok(elapsed < 300, `latest page took ${elapsed.toFixed(0)} ms; the parked poll would wait 1000 ms`);
+  assert.equal(parked.pages.filter(v => v === 'v1').length, 1, 'the stale page is not retried');
+  parked.parkedMs = elapsed;
+ } finally { parked.view.stop(); }
+
+ // 403: access revoked while a slow page download is in flight.
+ let finishSlow;
+ const slow = new Promise(resolve => { finishSlow = resolve; });
+ const revoked = harness(async (version, readBody) => {
+  if (version === 'v1') { await slow; return pdfBody(readBody); }
+  throw error(403);
+ });
+ try {
+  await until(() => revoked.pages.includes('v1'), 'slow first page requested');
+  revoked.latest = slide(3, 'v3');
+  await until(() => revoked.pages.includes('v3'), 'next page requested after revocation');
+  await until(() => revoked.status.textContent === '교안 접근 권한이 없습니다.', 'revocation stops the view');
+  const pollsAtStop = revoked.polls.length;
+  finishSlow();
+  await new Promise(resolve => setTimeout(resolve, 60));
+  assert.equal(revoked.content.children.length, 0, 'a render finishing after revocation does not repaint');
+  assert.equal(revoked.view.page(), null);
+  assert.equal(revoked.polls.length, pollsAtStop, 'no polling after access ends');
+  assert.equal(revoked.pages.filter(v => v === 'v3').length, 1, 'a revoked page is not retried');
+ } finally { finishSlow(); revoked.view.stop(); }
+ console.log('OK: student view refetches on 409 (parked poll cancelled, latest page in',
+  parked.parkedMs.toFixed(0), 'ms) and stops on 401/403 without late repaint');
+}
+
+{
+ // Live protocol rules on their own: decoding, poll query and version decisions.
+ const ctx = vm.createContext({window:{QU:{el(){}}}, URLSearchParams, TextDecoder});
+ vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-live-protocol.js'),'utf8'), ctx);
+ const P = ctx.window.QU.liveProtocol;
+ assert.ok(ctx.window.QU.el, 'protocol keeps existing QU members');
+ const plain = value => JSON.parse(JSON.stringify(value));
+
+ assert.ok(P.isLivePage('application/vnd.question-up.live-page'));
+ assert.ok(!P.isLivePage('application/json') && !P.isLivePage(null));
+ const meta = new TextEncoder().encode(JSON.stringify({status:'OPEN', slide:{page:3, version:'v3', sequence:4}}));
+ const pdf = new TextEncoder().encode('%PDF-1.7 page');
+ const frame = new Uint8Array(4 + meta.length + pdf.length);
+ new DataView(frame.buffer).setUint32(0, meta.length);
+ frame.set(meta, 4); frame.set(pdf, 4 + meta.length);
+ const decoded = P.decodeLiveFrame(frame.buffer);
+ assert.deepEqual(plain({status:decoded.status, slide:decoded.slide}), {status:'OPEN', slide:{page:3, version:'v3', sequence:4}});
+ assert.equal(new TextDecoder().decode(decoded.inlinePdf), '%PDF-1.7 page');
+ assert.throws(() => P.decodeLiveFrame(frame.buffer.slice(0, 4 + meta.length)), /Incomplete/, 'metadata without a page');
+ assert.throws(() => P.decodeLiveFrame(new ArrayBuffer(2)), /Incomplete/, 'truncated length prefix');
+
+ const query = text => Object.fromEntries(new URLSearchParams(text));
+ assert.deepEqual(query(P.pollQuery({})), {version:''});
+ assert.deepEqual(query(P.pollQuery({version:'v1', stamp:'r1', indexVersion:'i1', inline:true})),
+  {version:'v1', after:'r1', index_version:'i1', inline_page:'true', partial_page:'true'});
+ assert.deepEqual(query(P.pollQuery({version:'v1', stamp:'r1', indexVersion:'i1', inline:true, fresh:true})),
+  {version:'v1', index_version:'i1', inline_page:'true', partial_page:'true'}, 'right after a 409 the poll does not park');
+ assert.deepEqual(query(P.pollQuery({version:'v1', stamp:'', inline:false})), {version:'v1', after:''});
+
+ const s = (version, sequence) => ({version, sequence, page:sequence});
+ let r = P.applyUpdate({slide:s('a',2), confirmed:s('a',2)}, {revision:'r9', slide:s('b',3)});
+ assert.deepEqual(plain(r), {stamp:'r9', delay:0, stale:false, confirmed:s('b',3), changed:true});
+ r = P.applyUpdate({slide:s('b',3), confirmed:s('b',3)}, {revision:'r9', slide:s('a',2)});
+ assert.equal(r.stale, true, 'an older sequence never replaces the slide on screen');
+ assert.deepEqual(plain(r.confirmed), s('b',3));
+ r = P.applyUpdate({slide:s('a',2), confirmed:s('a',2)}, {partial:true, revision:'r9', slide:s('b',3)});
+ assert.deepEqual([r.stamp, r.delay, r.changed], [undefined, 0, true], 'partial responses poll again at once without a stamp');
+ r = P.applyUpdate({slide:s('a',2), confirmed:s('c',5)}, {slide:s('b',3)});
+ assert.deepEqual([r.stamp, r.delay, r.stale, r.changed], [undefined, 2000, false, true]);
+ assert.deepEqual(plain(r.confirmed), s('c',5), 'a newer confirmed publish is kept');
+ r = P.applyUpdate({slide:s('a',2), confirmed:s('a',2)}, {revision:'r1', slide:s('a',2)});
+ assert.equal(r.changed, false);
+ r = P.applyUpdate({slide:s('a',2), confirmed:s('a',2)}, {revision:'r1', status:'CLOSED', slide:null});
+ assert.deepEqual([r.stale, r.changed], [false, true], 'closing clears the slide');
+ assert.deepEqual(plain(P.applyUpdate({slide:null, confirmed:null}, {revision:'r1', slide:{version:'x'}}).confirmed), {version:'x'});
+
+ assert.ok(P.acceptsAcknowledgement(s('a',3), s('b',3)) && P.acceptsAcknowledgement(null, {}));
+ assert.ok(!P.acceptsAcknowledgement(s('a',4), s('b',3)));
+
+ const n = args => P.neighborPage({visiblePages:[], navigation:null, pageCount:5, ...args});
+ assert.equal(n({visiblePages:[1,3,4], current:3, delta:1}), 4);
+ assert.equal(n({visiblePages:[1,3,4], current:1, delta:-1}), undefined);
+ assert.equal(n({navigation:{page:3, pdf:true, before:1, after:4}, current:3, delta:-1}), 1);
+ assert.equal(n({navigation:{page:3, pdf:true, before:1, after:4}, current:2, delta:1}), 3);
+ assert.equal(n({current:5, delta:1}), null);
+ console.log('OK: live protocol decodes frames, builds poll queries and orders slide versions');
 }
 
 {
