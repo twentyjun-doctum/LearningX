@@ -110,6 +110,33 @@ class ObjectiveProfileTests(unittest.TestCase):
             with self.subTest(body=body):
                 self.assertEqual(self.req("POST", self.path, self.faculty, json=body).status_code, 422)
 
+    def test_per_process_levels_are_stored_and_derive_the_coaching_process(self):
+        levels = {"remember": 3, "understand": 3, "apply": 3, "analyze": 3, "evaluate": 3, "create": 3}
+        base = {k: v for k, v in PROFILE.items() if k != "process"}
+        body = self.req("POST", self.path, self.faculty, json={**base, "process_weights": levels}).json()
+        self.assertEqual((body["process"], body["process_label"], body["weighted_mean"]), ("analyze", "분석", 3.5),
+                         "all levels at the middle default derive analyze")
+        self.assertEqual(body["process_weights"], levels)
+        high = self.req("POST", self.path, self.faculty, json={**base, "process": "remember", "process_weights": {
+            **levels, "remember": 1, "understand": 1, "apply": 2, "evaluate": 5, "create": 5}}).json()
+        self.assertEqual((high["process"], high["weighted_mean"]), ("evaluate", 5.0),
+                         "the server derives the process from the levels, ignoring a client-sent process")
+        only_recall = self.req("POST", self.path, self.faculty, json={**base, "process_weights": {
+            **{k: 1 for k in levels}, "remember": 5}}).json()
+        self.assertEqual(only_recall["process"], "remember", "a level of 1 carries no weight")
+        listed = self.req("GET", self.path, self.faculty).json()
+        self.assertEqual([item["process"] for item in listed["items"]], ["remember", "evaluate", "analyze"])
+        legacy = self.req("POST", self.path, self.faculty, json=PROFILE).json()
+        self.assertEqual((legacy["process"], legacy["process_weights"], legacy["weighted_mean"]), ("analyze", None, None),
+                         "single-process requests keep working")
+        for bad in ({**levels, "create": 6}, {**levels, "create": 0}, {k: 3 for k in list(levels)[:5]},
+                    {**levels, "memorize": 3}):
+            with self.subTest(levels=bad):
+                self.assertEqual(self.req("POST", self.path, self.faculty, json={**base, "process_weights": bad}).status_code, 422)
+        opened = self.open_class().json()
+        linked = self.req("GET", f"/v1/sessions/{opened['id']}/objective-profile", self.faculty).json()["profile"]
+        self.assertEqual(linked["version"], legacy["version"])
+
     def test_unobservable_objective_is_saved_with_a_warning(self):
         body = self.req("POST", self.path, self.faculty,
                         json={**PROFILE, "objective": "학생은 집단극화를 이해한다."}).json()

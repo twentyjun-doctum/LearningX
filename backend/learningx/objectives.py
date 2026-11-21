@@ -1,7 +1,8 @@
 """Unit learning objective profiles (learning objective control panel, spec v0.1).
 
 A faculty member sets, per material, one representative learning objective,
-its target cognitive process (revised Bloom), the performance evidence to look
+a 1-5 emphasis level for each revised-Bloom process (their weighted average
+gives the target process coaching aims at), the performance evidence to look
 for in student explanations, the coaching support level, optional knowledge
 type and application context, and approved "other" items. Each approval
 creates an immutable version. Opening a class links the material's latest
@@ -18,9 +19,9 @@ from datetime import datetime, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, Session, mapped_column
+from sqlalchemy.orm import Mapped, Session, mapped_column, relationship
 
 from .security import actor, require_course, session
 from .storage import Audit, Base, Material, User, uid
@@ -32,10 +33,29 @@ SUPPORT_LEVELS = ("minimal", "directional", "stepwise")
 KNOWLEDGE_TYPES = ("factual", "conceptual", "procedural", "metacognitive")
 APPLICATION_CONTEXTS = ("within_lesson", "similar_case", "new_situation")
 OTHER_KINDS = ("goal", "evidence", "guideline")
-PROCESS_LABEL = {"remember": "기억", "understand": "기억·이해", "apply": "적용",
+PROCESS_LABEL = {"remember": "기억", "understand": "이해", "apply": "적용",
                  "analyze": "분석", "evaluate": "평가", "create": "창안"}
 SUPPORT_LABEL = {"minimal": "힌트 최소", "directional": "방향 제시", "stepwise": "단계별 안내"}
 MAX_OTHER_ITEMS = 6
+LEVEL_MIN, LEVEL_MAX, LEVEL_DEFAULT = 1, 5, 3
+
+
+def weighted_mean(weights: dict) -> float:
+    """Position 1.0 (remember) .. 6.0 (create) on the Bloom order.
+
+    Level 1 means "not emphasised" and weighs 0, so a single emphasised process
+    can pull the mean all the way to its end. All at level 1 is neutral (3.5).
+    """
+    total = sum(weights[p] - LEVEL_MIN for p in PROCESSES)
+    if total == 0:
+        return 3.5
+    return round(sum((i + 1) * (weights[p] - LEVEL_MIN) for i, p in enumerate(PROCESSES)) / total, 2)
+
+
+def process_from_weights(weights: dict) -> str:
+    """Nearest process to the weighted mean, halves rounded up (all default -> analyze)."""
+    position = int(weighted_mean(weights) + 0.5)
+    return PROCESSES[min(len(PROCESSES), max(1, position)) - 1]
 
 
 def now():
@@ -59,7 +79,21 @@ class ObjectiveProfile(Base):
     other_items: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     approved_by: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
     approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=now, nullable=False)
+    weights_row: Mapped["ObjectiveProcessWeights | None"] = relationship(uselist=False, lazy="selectin")
     __table_args__ = (UniqueConstraint("material_id", "version", name="uq_objective_profile_version"),)
+
+    @property
+    def process_weights(self) -> dict | None:
+        return json.loads(self.weights_row.weights) if self.weights_row else None
+
+
+class ObjectiveProcessWeights(Base):
+    """Per-process emphasis levels of a profile version. A separate table keeps
+    objective_profiles unchanged (create_all adds tables, not columns); profiles
+    approved before weights existed have no row and use their single process."""
+    __tablename__ = "objective_process_weights"
+    profile_id: Mapped[str] = mapped_column(ForeignKey("objective_profiles.id"), primary_key=True)
+    weights: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class SessionObjectiveProfile(Base):
@@ -120,7 +154,11 @@ class OtherItem(BaseModel):
 
 class ProfileIn(BaseModel):
     objective: str = Field(min_length=5, max_length=300)
-    process: Literal["remember", "understand", "apply", "analyze", "evaluate", "create"]
+    # Either per-process levels (the process is then derived on the server) or,
+    # for older clients, a single process.
+    process_weights: dict[Literal["remember", "understand", "apply", "analyze", "evaluate", "create"],
+                          int] | None = None
+    process: Literal["remember", "understand", "apply", "analyze", "evaluate", "create"] | None = None
     evidence: str = Field(min_length=5, max_length=300)
     support: Literal["minimal", "directional", "stepwise"] = "directional"
     knowledge_type: Literal["factual", "conceptual", "procedural", "metacognitive"] | None = None
@@ -132,6 +170,25 @@ class ProfileIn(BaseModel):
     @classmethod
     def strip(cls, value):
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("process_weights")
+    @classmethod
+    def full_levels(cls, value):
+        if value is None:
+            return value
+        if set(value) != set(PROCESSES):
+            raise ValueError("process_weights needs a level for every process")
+        if any(not LEVEL_MIN <= level <= LEVEL_MAX for level in value.values()):
+            raise ValueError(f"levels are {LEVEL_MIN}..{LEVEL_MAX}")
+        return {p: value[p] for p in PROCESSES}
+
+    @model_validator(mode="after")
+    def derive_process(self):
+        if self.process_weights is not None:
+            self.process = process_from_weights(self.process_weights)
+        elif self.process is None:
+            raise ValueError("process_weights or process is required")
+        return self
 
 
 def _material(db, material_id, user):
@@ -148,7 +205,9 @@ def public_profile(profile: ObjectiveProfile | None) -> dict | None:
     return {
         "id": profile.id, "material_id": profile.material_id, "version": profile.version,
         "objective": profile.objective, "process": profile.process,
-        "process_label": PROCESS_LABEL[profile.process], "evidence": profile.evidence,
+        "process_label": PROCESS_LABEL[profile.process], "process_weights": profile.process_weights,
+        "weighted_mean": weighted_mean(profile.process_weights) if profile.process_weights else None,
+        "evidence": profile.evidence,
         "support": profile.support, "support_label": SUPPORT_LABEL[profile.support],
         "knowledge_type": profile.knowledge_type, "application_context": profile.application_context,
         "other_raw": profile.other_raw, "other_items": json.loads(profile.other_items),
@@ -161,7 +220,7 @@ def coaching_payload(profile, other_items=None) -> dict:
     items = json.loads(profile.other_items) if other_items is None else other_items
     return {
         "objective": profile.objective, "process": profile.process, "evidence": profile.evidence,
-        "support": profile.support, "knowledge_type": profile.knowledge_type,
+        "process_weights": profile.process_weights, "support": profile.support, "knowledge_type": profile.knowledge_type,
         "application_context": profile.application_context,
         "goals": [i["text"] for i in items if i["kind"] == "goal"],
         "evidences": [i["text"] for i in items if i["kind"] == "evidence"],
@@ -219,6 +278,8 @@ def approve_profile(material_id: str, data: ProfileIn, db: Session = Depends(ses
         knowledge_type=data.knowledge_type, application_context=data.application_context,
         other_raw=data.other_raw or None, other_items=json.dumps(items, ensure_ascii=False),
         approved_by=user.id)
+    if data.process_weights is not None:
+        profile.weights_row = ObjectiveProcessWeights(weights=json.dumps(data.process_weights))
     db.add(profile)
     db.add(Audit(actor_id=user.id, course_id=material.course_id, action="objective_profile_approved",
                  material_id=material.id, detail=f"version={version}"))

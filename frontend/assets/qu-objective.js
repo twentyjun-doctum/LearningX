@@ -1,20 +1,23 @@
 /* Question-up unit learning objective step (between upload and evidence approval).
  * Order follows backward design: objective -> evidence to observe -> coaching.
- * The target thinking process is a five-step scale (default: the middle step).
+ * Each thinking process gets a 1-5 emphasis level (default: the middle, 3); their
+ * weighted average picks the process coaching aims at (mirrors objectives.py).
  * Pure helpers live on window.QU.objectiveRules so they can be tested alone. */
 (() => {
   'use strict';
   const { el } = window.QU;
 
-  // Five steps over the revised Bloom processes; "remember" and "understand" share step 1.
   const PROCESSES = [
-    ['understand', '기억·이해', '핵심 사실을 확인하고 의미나 관계를 자신의 말로 설명한다.', '핵심 용어 두 가지를 식별하고 예시로 구분한다.'],
+    ['remember', '기억', '핵심 사실이나 용어를 확인한다.', '모형의 구성 요소 두 가지를 식별한다.'],
+    ['understand', '이해', '의미나 관계를 자신의 말로 설명한다.', '두 개념을 예시로 구분한다.'],
     ['apply', '적용', '개념이나 절차를 주어진 사례에 사용한다.', '사례에 적용할 공식을 고르고 계산한다.'],
     ['analyze', '분석', '부분·관계·가정을 구분한다.', '두 자료의 차이를 찾아 가능한 설명을 나눈다.'],
     ['evaluate', '평가', '명시한 기준으로 주장이나 방법을 판단한다.', '신뢰성 기준을 제시하고 자료로 판단을 정당화한다.'],
     ['create', '창안', '목적과 제약에 맞는 새 방안이나 산출물을 구성한다.', '대안을 제안하고 제약을 어떻게 충족하는지 설명한다.'],
   ];
-  const DEFAULT_PROCESS = PROCESSES[2][0];
+  // Emphasis levels 1..5; level 1 weighs 0 in the average.
+  const LEVELS = ['다루지 않음', '낮음', '보통', '높음', '매우 높음'];
+  const LEVEL_DEFAULT = 3;
   const SUPPORT = [
     ['minimal', '힌트 최소', '필요한 자료나 관점만 짧게 묻습니다.'],
     ['directional', '방향 제시', '살펴볼 방향을 제시하며 묻습니다.'],
@@ -42,21 +45,37 @@
 
   /* ---------- pure rules (tested in smoke.mjs) ---------- */
   const rules = {
-    PROCESSES, SUPPORT, REASON, RELEVANCE, UNASSESSED_REASON, DEFAULT_PROCESS,
-    stepOf: (process) => Math.max(0, PROCESSES.findIndex(([k]) => k === (process === 'remember' ? 'understand' : process))),
-    processAt: (step) => PROCESSES[Math.min(PROCESSES.length - 1, Math.max(0, step))][0],
-    emptyDraft: () => ({ objective: '', process: DEFAULT_PROCESS, evidence: '', support: 'directional',
+    PROCESSES, LEVELS, SUPPORT, REASON, RELEVANCE, UNASSESSED_REASON, LEVEL_DEFAULT,
+    defaultWeights: () => Object.fromEntries(PROCESSES.map(([k]) => [k, LEVEL_DEFAULT])),
+    // Position 1.0 (기억) .. 6.0 (창안); all at level 1 is neutral.
+    weightedMean(weights) {
+      const total = PROCESSES.reduce((sum, [k]) => sum + weights[k] - 1, 0);
+      if (!total) return 3.5;
+      return Math.round(PROCESSES.reduce((sum, [k], i) => sum + (i + 1) * (weights[k] - 1), 0) / total * 100) / 100;
+    },
+    // Nearest process to the weighted mean, halves rounded up (all default -> 분석).
+    focus(weights) {
+      const position = Math.floor(rules.weightedMean(weights) + 0.5);
+      return PROCESSES[Math.min(PROCESSES.length, Math.max(1, position)) - 1][0];
+    },
+    // Profiles approved before levels existed: their single process at the top, the rest unset.
+    weightsOf(profile) {
+      if (profile.process_weights) return { ...rules.defaultWeights(), ...profile.process_weights };
+      return Object.fromEntries(PROCESSES.map(([k]) => [k, k === profile.process ? 5 : 1]));
+    },
+    emptyDraft: () => ({ objective: '', weights: rules.defaultWeights(), evidence: '', support: 'directional',
       knowledge_type: '', application_context: '', other_raw: '', other_items: [] }),
     fromProfile(profile) {
       if (!profile) return rules.emptyDraft();
-      return { objective: profile.objective, process: rules.processAt(rules.stepOf(profile.process)), evidence: profile.evidence,
+      return { objective: profile.objective, weights: rules.weightsOf(profile), evidence: profile.evidence,
         support: profile.support, knowledge_type: profile.knowledge_type || '',
         application_context: profile.application_context || '', other_raw: profile.other_raw || '',
         other_items: (profile.other_items || []).map(({ kind, text }) => ({ kind, text })) };
     },
     // Request body for POST /objective-profiles; optional choices are omitted when unset.
     payload(draft) {
-      const body = { objective: draft.objective.trim(), process: draft.process, evidence: draft.evidence.trim(),
+      const body = { objective: draft.objective.trim(),
+        process_weights: Object.fromEntries(PROCESSES.map(([k]) => [k, draft.weights[k]])), evidence: draft.evidence.trim(),
         support: draft.support, other_items: draft.other_items.map(({ kind, text }) => ({ kind, text: text.trim() }))
           .filter((item) => item.text) };
       if (draft.knowledge_type) body.knowledge_type = draft.knowledge_type;
@@ -73,7 +92,7 @@
     same: (a, b) => JSON.stringify(rules.payload(a)) === JSON.stringify(rules.payload(b)),
     summary(profile) {
       if (!profile) return '미설정 · 기존 코칭 흐름을 사용합니다';
-      return `v${profile.version} · ${label(PROCESSES, rules.processAt(rules.stepOf(profile.process)))} · ${label(SUPPORT, profile.support)} · ${profile.objective}`;
+      return `v${profile.version} · ${label(PROCESSES, profile.process)} 중심 · ${label(SUPPORT, profile.support)} · ${profile.objective}`;
     },
   };
 
@@ -117,44 +136,63 @@
         'aria-label': name, oninput: (e) => { draft[key] = e.target.value; refresh(); } });
     }
 
-    // Five-step scale: a native range input (arrow keys, Home/End, touch) drawn as a pill track.
-    // It is updated in place, never rebuilt, so a drag in progress is not interrupted.
+    // One 5-level slider per process: native range inputs (arrow keys, Home/End, touch) drawn as
+    // pill tracks. They are updated in place, never rebuilt, so a drag in progress is not interrupted.
     function scale() {
-      const range = el('input', { type: 'range', id: uid('process'), class: 'obj-range', min: 1, max: PROCESSES.length,
-        step: 1, value: rules.stepOf(draft.process) + 1, 'aria-label': '목표 사고 과정',
-        oninput: (e) => pickProcess(rules.processAt(Number(e.target.value) - 1)) });
-      const node = el('div', { class: 'obj-scale' },
-        el('div', { class: 'obj-scale-head', 'aria-hidden': 'true' },
-          el('span', { class: 'obj-scale-value', id: uid('process-value') }),
-          el('span', { class: 'obj-scale-desc', id: uid('process-desc') })),
-        el('div', { class: 'obj-scale-track', id: uid('process-track') }, range,
-          el('div', { class: 'obj-scale-dots', 'aria-hidden': 'true' },
-            ...PROCESSES.map(() => el('span', { class: 'obj-scale-dot' })))),
-        el('div', { class: 'obj-scale-labels' }, ...PROCESSES.map(([key, text]) => el('button', {
-          type: 'button', class: 'obj-scale-label', tabindex: '-1', 'aria-hidden': 'true', 'data-process': key,
-          text, onclick: () => { pickProcess(key); byId('process')?.focus(); } }))));
-      return node;
+      const rows = PROCESSES.map(([key, name, description]) => el('div', { class: 'obj-wrow' },
+        el('div', { class: 'obj-wrow-name' }, el('b', { text: name }), el('span', { class: 'small muted', text: description })),
+        el('div', { class: 'obj-scale-track sm', id: uid(`w-${key}-track`) },
+          el('input', { type: 'range', id: uid(`w-${key}`), class: 'obj-range', min: 1, max: LEVELS.length, step: 1,
+            value: draft.weights[key], 'aria-label': `${name} 강조 수준`,
+            oninput: (e) => setLevel(key, Number(e.target.value)) }),
+          el('div', { class: 'obj-scale-dots', 'aria-hidden': 'true' }, ...LEVELS.map(() => el('span', { class: 'obj-scale-dot' })))),
+        el('span', { class: 'obj-wrow-level', id: uid(`w-${key}-level`), 'aria-hidden': 'true' })));
+      return el('div', { class: 'obj-scale' },
+        el('div', { class: 'obj-scale-head' },
+          el('span', { class: 'obj-scale-kicker', text: '코칭이 향할 사고 과정' }),
+          el('span', { class: 'obj-scale-value', id: uid('focus') }),
+          el('span', { class: 'obj-scale-desc', id: uid('focus-desc') }),
+          el('div', { class: 'obj-mean', 'aria-hidden': 'true' },
+            el('div', { class: 'obj-mean-track' }, el('span', { class: 'obj-mean-pin', id: uid('mean-pin') })),
+            el('div', { class: 'obj-mean-labels' }, ...PROCESSES.map(([, name]) => el('span', { text: name })))),
+          el('span', { class: 'sr-only', id: uid('focus-live'), role: 'status', 'aria-live': 'polite' })),
+        el('div', { class: 'obj-wrows' }, ...rows),
+        el('div', { class: 'row obj-scale-foot' },
+          el('span', { class: 'muted small grow', text: '1 다루지 않음 · 3 보통 · 5 매우 높음. 강조 수준을 가중치로 평균 낸 위치에 가장 가까운 과정으로 되물어요.' }),
+          el('button', { class: 'btn sm', type: 'button', id: uid('w-reset'), text: '모두 보통으로', onclick: () => {
+            draft.weights = rules.defaultWeights(); paintScale(); refresh(); } })));
     }
 
-    function pickProcess(process) {
-      draft.process = process;
+    function setLevel(key, level) {
+      draft.weights[key] = level;
       paintScale();
       refresh();
     }
 
     function paintScale() {
-      const step = rules.stepOf(draft.process);
-      const [, name, description, example] = PROCESSES[step];
-      const range = byId('process');
-      if (!range) return;
-      if (Number(range.value) !== step + 1) range.value = String(step + 1);
-      range.setAttribute('aria-valuetext', `${step + 1}단계 ${name}: ${description}`);
-      byId('process-value').textContent = name;
-      byId('process-desc').textContent = description;
-      const track = byId('process-track');
-      track.style.setProperty('--fill', String(step / (PROCESSES.length - 1)));
-      track.querySelectorAll('.obj-scale-dot').forEach((dot, i) => dot.classList.toggle('is-filled', i <= step));
-      root.querySelectorAll('.obj-scale-label').forEach((button, i) => button.classList.toggle('is-on', i === step));
+      if (!byId('focus')) return;
+      const focus = rules.focus(draft.weights);
+      const mean = rules.weightedMean(draft.weights);
+      const [, name, description, example] = PROCESSES.find(([k]) => k === focus);
+      PROCESSES.forEach(([key, pname]) => {
+        const level = draft.weights[key];
+        const range = byId(`w-${key}`);
+        if (Number(range.value) !== level) range.value = String(level);
+        range.setAttribute('aria-valuetext', `${pname} ${level}단계, ${LEVELS[level - 1]}`);
+        const track = byId(`w-${key}-track`);
+        track.style.setProperty('--fill', String((level - 1) / (LEVELS.length - 1)));
+        track.querySelectorAll('.obj-scale-dot').forEach((dot, i) => dot.classList.toggle('is-filled', i < level));
+        byId(`w-${key}-level`).textContent = LEVELS[level - 1];
+        byId(`w-${key}-level`).classList.toggle('is-off', level === 1);
+        range.closest('.obj-wrow').classList.toggle('is-focus', key === focus);
+      });
+      byId('focus').textContent = name;
+      byId('focus-desc').textContent = `가중 평균 ${mean.toFixed(1)} · ${description}`;
+      byId('mean-pin').style.setProperty('--pos', String((mean - 1) / (PROCESSES.length - 1)));
+      if (byId('focus-live').dataset.focus !== focus) {
+        byId('focus-live').dataset.focus = focus;
+        byId('focus-live').textContent = `코칭이 향할 사고 과정: ${name}`;
+      }
       if (byId('evidence')) byId('evidence').placeholder = example;
       if (byId('evidence-example')) byId('evidence-example').textContent = `예시 · ${example}`;
     }
@@ -184,11 +222,12 @@
           el('span', { class: 'grow', text: p.text }), el('span', { class: 'muted small', text: REASON[p.reason] || '' }))),
         ...interpretation.conflicts.map((c) => el('div', { class: 'obj-row is-conflict' },
           el('span', { class: 'grow', text: c.field === 'process'
-            ? `“${c.item}”은(는) ${label(PROCESSES, rules.processAt(rules.stepOf(c.suggested)))} 단계에 가까워요. 현재는 ${label(PROCESSES, c.current)}입니다.`
+            ? `“${c.item}”은(는) ${label(PROCESSES, c.suggested)} 과정에 가까워요. 현재 중심은 ${label(PROCESSES, c.current)}입니다.`
             : `“${c.item}”은(는) ${label(SUPPORT, c.suggested)}에 가까워요. 현재는 ${label(SUPPORT, c.current)}입니다.` }),
-          el('button', { class: 'btn sm', type: 'button', text: '제안 값 적용', onclick: () => {
+          el('button', { class: 'btn sm', type: 'button', text: c.field === 'process' ? `${label(PROCESSES, c.suggested)} 강조 높이기` : '제안 값 적용', onclick: () => {
             interpretation.conflicts = interpretation.conflicts.filter((x) => x !== c);
-            set({ [c.field]: c.field === 'process' ? rules.processAt(rules.stepOf(c.suggested)) : c.suggested }); } }),
+            if (c.field === 'process') set({ weights: { ...draft.weights, [c.suggested]: LEVELS.length } });
+            else set({ [c.field]: c.suggested }); } }),
           el('button', { class: 'btn sm', type: 'button', text: '현재 값 유지', onclick: () => {
             interpretation.conflicts = interpretation.conflicts.filter((x) => x !== c); render(); } }))),
         el('p', { class: 'muted small', text: interpretation.source === 'model'
@@ -235,17 +274,18 @@
     function render() {
       // Re-rendering replaces the controls; keep keyboard focus (scale, radios) where it was.
       const focused = document.activeElement && root.contains(document.activeElement) ? document.activeElement.id : null;
-      const [, , , example] = PROCESSES[rules.stepOf(draft.process)];
+      const focusExample = () => PROCESSES.find(([k]) => k === rules.focus(draft.weights))[3];
+      const example = focusExample();
       root.replaceChildren(
         card('단원 학습목표', '“학생은 [조건·자료]를 사용해 [대상]을 [관찰 가능한 행동]할 수 있다.”',
           textarea('objective', '단원 학습목표', draft.objective, 'objective', 2, 300,
             '학생은 토론 전후 분포를 보고 평균 변화가 어느 집단의 변화에서 비롯됐는지 설명할 수 있다.')),
-        card('목표 사고 과정', '챗봇이 학생에게 되물을 다음 단계의 방향이에요. 학생 질문의 수준 판정에는 쓰지 않아요.', scale()),
+        card('목표 사고 과정', '이번 단원에서 각 사고 과정을 얼마나 강조할지 정해 주세요. 학생 질문의 수준 판정에는 쓰지 않아요.', scale()),
         card('확인할 수행 증거', '학생 설명에서 무엇이 보이면 목표에 다가갔다고 볼지 적어 주세요.',
           textarea('evidence', '확인할 수행 증거', draft.evidence, 'evidence', 2, 300, example),
           el('div', { class: 'row' }, el('span', { class: 'muted small grow', id: uid('evidence-example'), text: `예시 · ${example}` }),
             el('button', { class: 'btn sm', type: 'button', text: '예시 넣기',
-              onclick: () => set({ evidence: PROCESSES[rules.stepOf(draft.process)][3] }) }))),
+              onclick: () => set({ evidence: focusExample() }) }))),
         card('코칭 지원 정도', '목표 수준과 별개로 역질문을 얼마나 구체적으로 할지 정해요.', supportControl()),
         fold('optional', '선택 항목', '지식 유형 · 적용 맥락',
           el('div', { class: 'obj-grid' },
@@ -269,7 +309,7 @@
       busy = true; refresh(); say('해석하는 중…');
       try {
         interpretation = await api(`/v1/materials/${materialId}/objective-profiles/interpret`, { method: 'POST',
-          body: { text: draft.other_raw.trim(), process: draft.process, support: draft.support } });
+          body: { text: draft.other_raw.trim(), process: rules.focus(draft.weights), support: draft.support } });
         say(interpretation.items.length ? '' : '나눌 항목을 찾지 못했어요. 직접 추가해 주세요.');
       } catch (err) {
         interpretation = null;

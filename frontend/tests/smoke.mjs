@@ -126,31 +126,38 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
  const R = ctx.window.QU.objectiveRules;
  const plain = value => JSON.parse(JSON.stringify(value));
- assert.deepEqual(plain(R.PROCESSES.map(([k, t]) => [k, t])), [['understand','기억·이해'],['apply','적용'],['analyze','분석'],['evaluate','평가'],['create','창안']]);
- assert.equal(R.stepOf('remember'), 0, 'legacy remember profiles land on step 1');
- assert.equal(R.processAt(9), 'create');
+ assert.deepEqual(plain(R.PROCESSES.map(([k, t]) => [k, t])), [['remember','기억'],['understand','이해'],['apply','적용'],['analyze','분석'],['evaluate','평가'],['create','창안']]);
+ assert.equal(R.LEVELS.length, 5, 'each process has a 5-level scale');
+ const mid = R.defaultWeights();
+ assert.ok(Object.values(mid).every(v => v === 3), 'every process starts at the middle level');
+ assert.equal(R.weightedMean(mid), 3.5); assert.equal(R.focus(mid), 'analyze', 'all-middle levels aim at 분석');
+ const ones = Object.fromEntries(Object.keys(mid).map(k => [k, 1]));
+ assert.equal(R.focus({...ones, remember:5}), 'remember', 'level 1 carries no weight');
+ assert.equal(R.focus({...ones, create:5}), 'create');
+ assert.equal(R.focus(ones), 'analyze', 'nothing emphasised is neutral');
+ assert.equal(R.focus({...mid, remember:1, understand:1, apply:2, evaluate:5, create:5}), 'evaluate');
+ assert.deepEqual(plain(R.weightsOf({process:'evaluate'})), {...ones, evaluate:5}, 'legacy single-process profiles keep their process');
  assert.deepEqual(plain(R.SUPPORT.map(([k]) => k)), ['minimal','directional','stepwise']);
  const empty = R.emptyDraft();
- assert.equal(empty.process, 'analyze', 'scale starts at the middle step');
- assert.equal(R.stepOf(empty.process), 2);
+ assert.equal(R.focus(empty.weights), 'analyze', 'a new draft starts at the middle on every process');
  assert.equal(empty.support, 'directional', 'support defaults to directional');
  assert.deepEqual(plain(R.missing(empty)), ['학습목표','확인할 수행 증거']);
- const draft = {...empty, objective:'  학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다. ', process:'analyze',
+ const draft = {...empty, objective:'  학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다. ', weights:{...mid, evaluate:4},
   evidence:'평균과 분포를 각각 근거로 사용한다.', other_raw:' ', other_items:[{kind:'guideline', text:' 자료와 해석을 나눠 말하도록 요청 '}, {kind:'goal', text:'  '}]};
  assert.deepEqual(plain(R.missing(draft)), []);
- assert.deepEqual(plain(R.payload(draft)), {objective:'학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.', process:'analyze',
-  evidence:'평균과 분포를 각각 근거로 사용한다.', support:'directional',
+ assert.deepEqual(plain(R.payload(draft)), {objective:'학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.',
+  process_weights:{remember:3, understand:3, apply:3, analyze:3, evaluate:4, create:3}, evidence:'평균과 분포를 각각 근거로 사용한다.', support:'directional',
   other_items:[{kind:'guideline', text:'자료와 해석을 나눠 말하도록 요청'}]}, 'unset optional fields and blank items are omitted');
  const withOptional = R.payload({...draft, knowledge_type:'conceptual', application_context:'new_situation', other_raw:'메모'});
  assert.deepEqual(plain([withOptional.knowledge_type, withOptional.application_context, withOptional.other_raw]), ['conceptual','new_situation','메모']);
- const saved = {version:2, objective:draft.objective.trim(), process:'analyze', evidence:draft.evidence, support:'directional',
+ const saved = {version:2, objective:draft.objective.trim(), process:'analyze', process_weights:{...mid, evaluate:4}, evidence:draft.evidence, support:'directional',
   knowledge_type:null, application_context:null, other_raw:null, other_items:[{kind:'guideline', text:'자료와 해석을 나눠 말하도록 요청'}]};
  assert.ok(R.same(R.fromProfile(saved), draft), 'whitespace-only differences are not unsaved changes');
  assert.ok(!R.same(R.fromProfile(saved), {...draft, support:'stepwise'}));
  assert.equal(R.summary(null), '미설정 · 기존 코칭 흐름을 사용합니다');
- assert.equal(R.summary(saved), 'v2 · 분석 · 방향 제시 · 학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.');
+ assert.equal(R.summary(saved), 'v2 · 분석 중심 · 방향 제시 · 학생은 분포를 보고 평균 변화의 원인을 설명할 수 있다.');
  assert.ok(R.REASON.answer_disclosure && R.REASON.evidence_unclear && R.RELEVANCE.prerequisite);
- console.log('OK: learning objective step precedes approval, uses a 5-step scale defaulting to the middle and builds clean requests');
+ console.log('OK: learning objective step precedes approval, sets a 5-level emphasis per process (default middle) whose weighted average picks the focus and builds clean requests');
 }
 
 {
