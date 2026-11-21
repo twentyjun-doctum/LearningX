@@ -21,6 +21,7 @@ from . import private_store
 from .ingest_queue import router as ingest_router
 from .guest import router as guest_router, is_guest
 from .classroom import router as classroom_router
+from .objectives import router as objectives_router
 
 app=FastAPI(title="LearningX NIT Backend",version="0.1.0",docs_url=None,redoc_url=None)
 # Frontend origins must be explicitly configured; no wildcard CORS with bearer tokens.
@@ -308,3 +309,6 @@ app.include_router(ingest_router)
 app.include_router(classroom_router)
 
 app.include_router(guest_router)
+
+# Unit learning objective profiles (faculty review/approval step).
+app.include_router(objectives_router)
