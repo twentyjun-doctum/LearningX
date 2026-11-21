@@ -46,7 +46,12 @@ MAX_INLINE_PAGE_BYTES = 2 * 1024 * 1024
 STUDENT_TOKEN_MINUTES = 240
 LEVEL_MAP = {"clarify": "shallow", "apply": "mid", "analyze": "mid",
              "evaluate": "deep", "create": "deep"}
-LEVEL_LABEL = {"shallow": "얕은", "mid": "중간", "deep": "깊은"}
+# A level exists only when the model's judgment passed schema and policy checks.
+# Fallback coaching (no matching approved evidence, model timeout or failure,
+# guest classes without a model) is recorded as unassessed, never as a level.
+# Its reason stays in the stored coaching JSON (mode, reason).
+UNASSESSED = "unassessed"
+LEVEL_LABEL = {"shallow": "얕은", "mid": "중간", "deep": "깊은", UNASSESSED: "판정 보류"}
 
 
 def now():
@@ -213,15 +218,18 @@ def _new_code(db) -> str:
 
 
 def _level(coaching: dict) -> str:
-    return LEVEL_MAP.get(str(coaching.get("question_level", "")), "shallow")
+    if coaching.get("mode") != "MODEL_VALIDATED":
+        return UNASSESSED
+    return LEVEL_MAP.get(str(coaching.get("question_level", "")), UNASSESSED)
 
 
 def _student_coaching(coaching: dict) -> dict:
     """Only fields a student screen needs; never model metadata."""
+    level = _level(coaching)
     return {
         "mode": coaching.get("mode"),
-        "question_level": coaching.get("question_level"),
-        "level": _level(coaching),
+        "question_level": None if level == UNASSESSED else coaching.get("question_level"),
+        "level": level,
         "follow_up_question": coaching.get("follow_up_question"),
         "feedback": coaching.get("feedback"),
         "evidence_refs": [{"page": r.get("page")} for r in coaching.get("evidence_refs", []) if isinstance(r, dict)],
@@ -943,12 +951,12 @@ def share_slide(session_id: str, data: ShareSlide, request: Request,
 
 
 @router.get("/sessions/{session_id}/board")
-def board(session_id: str, level: Literal["all", "shallow", "mid", "deep"] = "all",
+def board(session_id: str, level: Literal["all", "shallow", "mid", "deep", "unassessed"] = "all",
           include_hidden: bool = False, db: Session = Depends(session), user: User = Depends(actor)):
     s = _faculty_session(db, session_id, user)
     q = db.query(SessionQuestion).filter_by(session_id=s.id, submitted=True)
     rows = q.order_by(SessionQuestion.submitted_at, SessionQuestion.id).all()
-    counts = {"all": 0, "shallow": 0, "mid": 0, "deep": 0}
+    counts = {"all": 0, "shallow": 0, "mid": 0, "deep": 0, UNASSESSED: 0}
     selected = []
     for r in rows:
         if r.hidden and not include_hidden:
