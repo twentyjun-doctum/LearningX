@@ -214,7 +214,7 @@ def public(check: "SuitabilityCheck | None") -> dict | None:
     if check is None:
         return None
     codes = json.loads(check.reason_codes)
-    return {"status": check.status, "reason_codes": codes, "primary_reason": codes[0] if codes else None,
+    return {"status": check.status, "mode": check.mode, "reason_codes": codes, "primary_reason": codes[0] if codes else None,
             "policy_version": check.policy_version,
             "checked_at": check.checked_at.isoformat() if check.checked_at else None}
 

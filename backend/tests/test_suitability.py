@@ -196,6 +196,7 @@ class SuitabilityTests(unittest.TestCase):
         self.open_class(guest=True)
         body = self.ask(self.student())
         self.assertEqual(body["suitability"]["status"], "eligible")
+        self.assertEqual(body["suitability"]["mode"], "rules")
         self.assertEqual(self.gateway.calls, [])
 
     # ---------- model path ----------
@@ -206,6 +207,7 @@ class SuitabilityTests(unittest.TestCase):
         with patch.object(fit, "process") as later:
             body = self.ask(token)
         self.assertEqual(body["suitability"]["status"], "pending", "ask answers with coaching and pending")
+        self.assertEqual(body["suitability"]["mode"], "model")
         later.assert_called_once_with(body["id"], body["revision_id"])
         fit.process(body["id"], body["revision_id"])
         self.assertEqual(self.mine(token)[body["id"]]["suitability"]["status"], "eligible")
