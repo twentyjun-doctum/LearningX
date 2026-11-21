@@ -99,7 +99,9 @@
     return node;
   }
 
-  const LEVEL = { shallow: '얕은', mid: '중간', deep: '깊은' };
+  const LEVEL = { shallow: '얕은', mid: '중간', deep: '깊은', unassessed: '판정 보류' };
+  // A question whose judgment failed (fallback coaching) has no level to show.
+  const levelText = (level) => (level === 'unassessed' ? '수준 판정 보류' : `${LEVEL[level]} 질문`);
 
   function relTime(iso) {
     if (!iso) return '';
@@ -118,5 +120,5 @@
     });
   }
 
-  window.QU = { apiBase, client, ApiError, el, LEVEL, relTime, liveMark, liveTimingEnabled: traceEnabled };
+  window.QU = { apiBase, client, ApiError, el, LEVEL, levelText, relTime, liveMark, liveTimingEnabled: traceEnabled };
 })();

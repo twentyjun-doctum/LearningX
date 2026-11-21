@@ -75,6 +75,37 @@ for (const [hostname, query, expected] of [
 console.log('OK: API origin confinement protects invite codes and tokens');
 
 {
+ // A question whose judgment failed has no level: neutral label, own filter, no plant growth.
+ const ctx = vm.createContext({window:{}, location:{hostname:'localhost', search:''}, URL, URLSearchParams,
+  AbortController, setTimeout, clearTimeout, fetch: async () => { throw new Error('offline'); }, document:{}, Node:class {}});
+ vm.runInContext(quApi, ctx);
+ const {levelText} = ctx.window.QU;
+ assert.equal(levelText('unassessed'), '수준 판정 보류');
+ assert.equal(levelText('deep'), '깊은 질문');
+ assert.match(teacher, /data-level="unassessed"[^>]*>판정 보류 <span data-count="unassessed">/);
+ assert.ok(quTeacher.includes("['all', 'deep', 'mid', 'shallow', 'unassessed']"), 'teacher paints the unassessed count');
+ const start = quStudent.indexOf('  function renderCoaching(level, c) {');
+ const end = quStudent.indexOf('\n  function ', start + 10);
+ const stages = [];
+ const messages = [];
+ const el = (tag, attrs = {}, ...kids) => ({tag, attrs, kids, append(...more){ kids.push(...more); }});
+ const student = vm.createContext({el, levelText, LEVEL: ctx.window.QU.LEVEL, plant: stage => ({plant: stage}),
+  RANK: {seed: 0, shallow: 1, mid: 2, deep: 3}, GROWTH: {}, TEMPLATES: {}, st: {stage: 'mid'},
+  setStage: stage => stages.push(stage), coachMsg: (...parts) => messages.push(parts),
+  $: () => ({append(){}}), scrollThread(){}, submitCurrent(){}, updateComposer(){}, useTemplate(){},
+  document: {createTextNode: text => ({text})}});
+ vm.runInContext(quStudent.slice(start, end) + '\nthis.renderCoaching = renderCoaching;', student);
+ student.renderCoaching('unassessed', {follow_up_question: '어떤 기준으로 구별할 수 있을까요?', feedback: '고정 문구'});
+ assert.deepEqual(stages, [], 'an unassessed answer never moves the plant');
+ const texts = JSON.stringify(messages);
+ assert.ok(texts.includes('수준 판정 보류') && texts.includes('어떤 기준으로 구별할 수 있을까요?'));
+ assert.ok(!texts.includes('얕은') && !texts.includes('중간') && !texts.includes('깊은'), 'no level words for an unassessed answer');
+ student.renderCoaching('deep', {follow_up_question: '다른 해석은 무엇일까요?'});
+ assert.deepEqual(stages, ['deep'], 'validated levels still move the plant');
+ console.log('OK: unassessed questions show no level, keep their own filter and never grow the plant');
+}
+
+{
  const liveSource = fs.readFileSync(path.join(root,'assets/qu-live.js'),'utf8');
  const stubbed = liveSource.replace("import(pdfBase + 'build/pdf.min.mjs')", 'loadFixtureRenderer()');
  assert.notEqual(stubbed, liveSource);

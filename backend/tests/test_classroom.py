@@ -372,7 +372,7 @@ class ClassroomTests(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/v1/session-questions/{rid}/revisions", ts, json={"text": "다른 질문으로 바꿔 볼게요"}).status_code, 409)
 
         b = self.req("GET", f"/v1/sessions/{sid}/board", self.tf).json()
-        self.assertEqual(b["counts"], {"all": 2, "shallow": 1, "mid": 0, "deep": 1})
+        self.assertEqual(b["counts"], {"all": 2, "shallow": 1, "mid": 0, "deep": 1, "unassessed": 0})
         self.assertEqual([item["id"] for item in b["items"]], [rid2, rid])
         index = self.req("GET", f"/v1/sessions/{sid}/live", self.tf).json()["index"]
         self.assertEqual([item["id"] for item in index], [rid2, rid])
