@@ -70,23 +70,34 @@
   const slidePanel = $('student-slide');
   const expandButton = $('student-slide-expand');
 
+  const fullscreenElement = () => document.fullscreenElement || document.webkitFullscreenElement;
+  let fullscreenResizeFrame;
+
   function expanded() {
-    return document.fullscreenElement === slidePanel || slidePanel.classList.contains('live-expanded');
+    return fullscreenElement() === slidePanel || slidePanel.classList.contains('live-expanded');
+  }
+
+  function resizeExpandedSlide() {
+    cancelAnimationFrame(fullscreenResizeFrame);
+    fullscreenResizeFrame = requestAnimationFrame(() => liveView?.resize());
   }
 
   function updateFullscreen() {
     const active = expanded();
+    slidePanel.classList.toggle('live-native-fullscreen', fullscreenElement() === slidePanel);
+    document.documentElement.classList.toggle('live-view-expanded', active);
     const label = active ? '교안 전체화면 종료' : '교안 전체화면';
     expandButton.setAttribute('aria-label', label);
     expandButton.title = label;
     if (!active) slidePanel.querySelector('[data-live-actions]').classList.remove('selection-actions');
     expandButton.setAttribute('aria-pressed', String(active));
-    liveView?.resize();
+    resizeExpandedSlide();
   }
 
   async function collapseSlide() {
-    if (document.fullscreenElement === slidePanel && document.exitFullscreen) {
-      await document.exitFullscreen().catch(() => {});
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (fullscreenElement() === slidePanel && exit) {
+      try { await exit.call(document); } catch (_) { /* The browser may already have exited. */ }
     }
     if (slidePanel.classList.contains('live-expanded')) {
       slidePanel.classList.remove('live-expanded');
@@ -97,8 +108,10 @@
   expandButton.addEventListener('click', async () => {
     if (expanded()) return collapseSlide();
     try {
-      if (slidePanel.requestFullscreen) {
-        await slidePanel.requestFullscreen();
+      const request = slidePanel.requestFullscreen || slidePanel.webkitRequestFullscreen;
+      if (request) {
+        await request.call(slidePanel);
+        updateFullscreen();
         return;
       }
     } catch (_) { /* Use the viewport on browsers that deny native fullscreen. */ }
@@ -106,6 +119,10 @@
     updateFullscreen();
   });
   document.addEventListener('fullscreenchange', updateFullscreen);
+  document.addEventListener('webkitfullscreenchange', updateFullscreen);
+  window.addEventListener('resize', () => {
+    if (expanded()) resizeExpandedSlide();
+  });
   document.addEventListener('keydown', event => {
     if (event.key === 'Escape' && slidePanel.classList.contains('live-expanded')) collapseSlide();
   });
