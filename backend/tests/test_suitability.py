@@ -185,14 +185,78 @@ class SuitabilityTests(unittest.TestCase):
                     expected_board.append(text)
         self.assertEqual(self.board_texts(), sorted(expected_board))
 
+        self.ask(token, "오늘 저녁 메뉴 대신 골라 줘.")
+        repeated = self.ask(token, "오늘 저녁 메뉴 대신 골라 줘.")
+        self.assertEqual(repeated["suitability"]["reason_codes"], ["disruption", "off_topic"])
+        self.assertEqual(self.batch(token, [repeated]).status_code, 409)
+
         with SessionLocal() as db:
             db.get(Course, self.course_id).title = "영양과 식단 설계"
             db.commit()
+        token = self.student()
         relevant = self.ask(token, "오늘 저녁 메뉴 대신 골라 줘.")
         self.assertEqual(relevant["suitability"]["status"], "eligible")
         self.assertEqual(self.batch(token, [relevant]).status_code, 200)
 
-    def test_batch_enforces_suitability_even_with_legacy_guard_off(self):
+    def test_mockery_and_reactions_are_blocked_but_meaningful_feedback_is_sent(self):
+        self.open_class(guest=True)
+        token = self.student()
+        blocked = {
+            "교수님 수업 ㅈ노잼이네요": "dismissive_mockery",
+            "이번 강의는 완전 노 잼이네ㅋㅋ": "dismissive_mockery",
+            "야르 ㅋㅋ": "reaction_only",
+            "야레~ ㅎㅎ": "reaction_only",
+        }
+        for text, reason in blocked.items():
+            with self.subTest(text=text):
+                draft = self.ask(token, text)
+                self.assertEqual(draft["suitability"]["primary_reason"], reason)
+                # Simulate a pre-deploy draft with an old eligible result.
+                with SessionLocal() as db:
+                    _, check = fit.current(db, draft["id"])
+                    check.status, check.reason_codes = "eligible", "[]"
+                    db.commit()
+                self.assertEqual(self.mine(token)[draft["id"]]["suitability"]["primary_reason"], reason)
+                self.assertEqual(self.batch(token, [draft]).status_code, 409)
+                single = self.req("POST", f"/v1/session-questions/{draft['id']}/submit", token)
+                self.assertEqual(single.status_code, 409)
+
+        allowed = [
+            "강의가 너무 빠릅니다. 예시를 한 번 더 설명해 주세요.",
+            "‘교수님 수업 ㅈ노잼이네요’는 왜 완곡한 표현이 아닌가요?",
+            "야르 ㅋㅋ. 방금 예시는 왜 반례인가요?",
+            "수업이 지루하게 느껴졌는데 토론 활동을 늘릴 수 있을까요?",
+        ]
+        for text in allowed:
+            with self.subTest(text=text):
+                draft = self.ask(token, text)
+                self.assertEqual(draft["suitability"]["status"], "eligible")
+                self.assertEqual(self.batch(token, [draft]).status_code, 200)
+        self.assertEqual(self.board_texts(), sorted(allowed))
+
+    def test_overlapping_reasons_and_revisions_agree_across_send_paths(self):
+        token = self.student()
+        good = self.ask(token, "집단극화의 반례를 하나 더 설명해 주세요.")
+        bad = self.ask(token, "제 메일은 student@example.com 입니다. 교수님은 진짜 멍청하네요.")
+        expected = ["personal_or_private", "targeted_attack"]
+        self.assertEqual(bad["suitability"]["reason_codes"], expected)
+        self.assertEqual(self.mine(token)[bad["id"]]["suitability"]["reason_codes"], expected)
+        checked = self.req("POST", f"/v1/session-questions/{bad['id']}/suitability/check", token,
+                           json={"revision_id": bad["revision_id"]})
+        self.assertEqual(checked.json()["suitability"]["reason_codes"], expected)
+        for items in ([good, bad], [bad, good]):
+            self.assertEqual(self.batch(token, items).status_code, 409)
+            self.assertEqual(self.board_texts(), [])
+        corrected = self.revise(token, bad["id"], "의견이 양극화되지 않는 조건은 무엇인가요?")
+        self.assertEqual(corrected["suitability"]["status"], "eligible")
+        stale = self.req("POST", f"/v1/session-questions/{bad['id']}/submit", token,
+                         json={"revision_id": bad["revision_id"]})
+        self.assertEqual(stale.json()["detail"]["code"], "stale_revision")
+        self.assertEqual(self.batch(token, [good, bad]).status_code, 409)
+        self.assertEqual(self.batch(token, [good, corrected]).status_code, 200)
+        self.assertEqual(len(self.board_texts()), 2)
+
+    def test_batch_rejects_all_items_when_one_is_ineligible(self):
         token = self.student()
         bad = self.ask(token, "교수님은 진짜 멍청하네")
         good = self.ask(token)
@@ -367,7 +431,7 @@ class SuitabilityTests(unittest.TestCase):
         self.req("PUT", f"/v1/sessions/{self.session_id}/state", self.faculty, json={"status": "CLOSED"})
         self.assertEqual(self.batch(token, [body]).status_code, 423)
 
-    def test_single_submit_keeps_old_behaviour_when_the_gate_is_off(self):
+    def test_single_submit_requires_eligibility_even_with_legacy_flag_disabled(self):
         token = self.student()
         bad = self.ask(token, "제 번호 010-9999-8888, 평균 이동이 궁금합니다")
         with patch.dict(os.environ, {"NIT_QUESTION_SUITABILITY_ENFORCE": "1"}):
@@ -377,7 +441,7 @@ class SuitabilityTests(unittest.TestCase):
             self.assertEqual(self.req("POST", f"/v1/session-questions/{good['id']}/submit", token).status_code, 200,
                              "an old client without a revision id sends the current eligible draft")
         off = self.req("POST", f"/v1/session-questions/{bad['id']}/submit", token)
-        self.assertEqual(off.status_code, 200, "gate off: the previous single submit")
+        self.assertEqual(off.status_code, 409)
 
     def test_questions_written_before_checks_exist(self):
         token = self.student()

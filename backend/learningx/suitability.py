@@ -14,8 +14,7 @@ Decisions applied:
   worker (the Northflank worker thread, or in-process after the response when
   no worker is configured). A late result for an older draft or attempt is
   discarded.
-- ``NIT_QUESTION_SUITABILITY_ENFORCE`` controls legacy single submission (default on).
-  Batch submission always requires an eligible revision.
+- Single and batch submission both require an eligible current revision.
 
 New tables only: create_all adds tables, not columns.
 """
@@ -32,9 +31,11 @@ from .storage import Base, uid
 
 POLICY_VERSION = "suitability-v1"
 STATUSES = ("pending", "eligible", "needs_revision")
-MODEL_REASONS = ("off_topic", "targeted_attack", "personal_or_private", "disruption", "context_needed")
+MODEL_REASONS = ("off_topic", "targeted_attack", "personal_or_private", "disruption",
+                 "dismissive_mockery", "reaction_only", "context_needed")
 # What the student should fix first.
-PRIORITY = ("personal_or_private", "targeted_attack", "disruption", "off_topic", "context_needed", "check_unavailable")
+PRIORITY = ("personal_or_private", "targeted_attack", "dismissive_mockery", "disruption",
+            "reaction_only", "off_topic", "context_needed", "check_unavailable")
 MAX_ATTEMPTS = 3
 LEASE_SECONDS = 60
 RETRY_BACKOFF_SECONDS = (0, 5, 20)
@@ -44,10 +45,6 @@ REPEAT_LIMIT = 2  # two earlier identical questions -> the third is disruption
 
 def now():
     return datetime.now(timezone.utc)
-
-
-def enforced() -> bool:
-    return os.getenv("NIT_QUESTION_SUITABILITY_ENFORCE", "1").strip().lower() in ("1", "true", "on", "yes")
 
 
 class QuestionHead(Base):
@@ -155,6 +152,14 @@ _REQUEST_PREFACE = re.compile(
     r"그냥\s*궁금한데[,\s]*)"
 )
 _NOISE = re.compile(r"^[ㅋㅎㅠㅜᄏ휴ᅮ!?.,…~\s]+$")
+_REACTION_ONLY = re.compile(r"(?:야[르레]+|아자+|와우+|오예+|응\s*아니야|ᄋᄌ|ᄅᄋ|ᄋᄋ)(?:[!?.,…~\sㅋㅎᄏᄒ]*)")
+_DISMISSIVE_MOCKERY = re.compile(
+    r"(?:(?:교수님|선생님|조교님)(?:의)?[,\s]*)?"
+    r"(?:이|오늘|이번)?\s*(?:수업|강의|설명|교안)(?:은|는|이|가)?\s*"
+    r"(?:(?:진짜|정말|완전|개|ᄌ|존나)\s*)*"
+    r"(?:노\s*잼|핵\s*노\s*잼|쓰레기|최악)"
+    r"(?:이네요?|이네|이야|입니다|임|인데요)?[!?.,…~\sㅋㅎᄏᄒ]*"
+)
 _PROMO_REQUEST = re.compile(
     r"(?:제|저희)\s*(?:채널|유튜브|쇼핑몰|오픈\s*채팅방)(?:을|에|에서)?\s*(?:구독|가입|구매)\s*(?:해\s*주세요|하세요|해\s*줘)"
 )
@@ -177,6 +182,16 @@ def _personal_request_topic(text: str):
     return None
 
 
+def expression_reason(text: str) -> str | None:
+    """Recognize stand-alone mockery and reactions without blocking quoted analysis."""
+    text = _visible_text(text).strip()
+    if _DISMISSIVE_MOCKERY.fullmatch(text):
+        return "dismissive_mockery"
+    if _REACTION_ONLY.fullmatch(text):
+        return "reaction_only"
+    return None
+
+
 def rule_reasons(text: str, recent_texts=()) -> list[str]:
     """Only verifiable patterns. A slur list or failed evidence search never decides here."""
     text = _visible_text(text).strip()
@@ -188,6 +203,8 @@ def rule_reasons(text: str, recent_texts=()) -> list[str]:
     if (_PROMO_LINK.search(text) or (_URL.search(text) and _PROMO_WORD.search(text))
             or _PROMO_REQUEST.search(text) or _NOISE.fullmatch(text)):
         reasons.append("disruption")
+    if reason := expression_reason(text):
+        reasons.append(reason)
     key = normalize(text)
     if key and sum(1 for other in recent_texts if normalize(other) == key) >= REPEAT_LIMIT and "disruption" not in reasons:
         reasons.append("disruption")
@@ -208,6 +225,8 @@ SYSTEM = """당신은 수업 중 학생 질문이 교수자에게 전달하기�
 - off_topic: 수업 개념·활동·진행과 명백히 무관한 질문이나 요청. 선행 개념, 새 사례, 수업 운영 질문은 관련 있음으로 봅니다. 교안에서 찾지 못했다는 이유만으로 무관하다고 하지 마세요.
 - targeted_attack: 개인·집단을 겨냥한 모욕·조롱·비하·위협. 주장·방법에 대한 반론, 분석 대상인 표현의 인용, 존중하는 불만 제기는 해당하지 않습니다.
 - personal_or_private: 무관한 사생활 캐묻기, 전달에 불필요한 식별정보·민감한 개인사 노출. 식별정보 없이 개념과 연결한 경험은 해당하지 않습니다. 민감한 주제라는 이유만으로 해당하지 않습니다.
+- dismissive_mockery: 질문이나 구체적 개선 요청 없이 수업·교안·설명을 조롱으로 깎아내리는 발화. 수업 속도, 설명 방식, 난이도에 대한 구체적인 피드백은 관련 있음으로 봅니다.
+- reaction_only: 추임새·밈·웃음으로만 이루어져 전달할 질문이나 피드백이 없는 발화. 웃음 표현 뒤에 의미 있는 질문이 이어지면 해당하지 않습니다.
 - disruption: 광고 또는 같은 내용을 반복해 진행을 방해하는 경우. 정당한 후속 질문과 수정은 해당하지 않습니다.
 - context_needed: 연결 단서를 덧붙이면 판정할 수 있는 모호한 질문. 질문 유형·길이·문법·깊이는 근거가 아닙니다.
 예: "선생님 집 주소를 알려주세요"는 personal_or_private, "그 설명에는 반례가 있지 않나요?"는 eligible입니다.
@@ -246,6 +265,21 @@ def public(check: "SuitabilityCheck | None") -> dict | None:
     return {"status": check.status, "mode": check.mode, "reason_codes": codes, "primary_reason": codes[0] if codes else None,
             "policy_version": check.policy_version,
             "checked_at": check.checked_at.isoformat() if check.checked_at else None}
+
+
+def effective_check(text: str, check: "SuitabilityCheck | None", policy_version: str) -> dict:
+    """Combine the saved decision with deterministic rules for the current text.
+
+    Repetition is evaluated when a revision is checked: later submissions can
+    change its reference set and must not retroactively alter earlier drafts.
+    """
+    state = public(check) or legacy_pending(policy_version)
+    reasons = rule_reasons(text)
+    if not reasons:
+        return state
+    codes = ordered([*reasons, *(code for code in state["reason_codes"] if code != "check_unavailable")])
+    return {**state, "status": "needs_revision", "mode": "rules",
+            "reason_codes": codes, "primary_reason": codes[0]}
 
 
 def current(db, row_id):
@@ -287,13 +321,14 @@ def drafts_for(db, rows, policy_version):
     checks = {(c.session_question_id, c.revision_id): c for c in db.query(SuitabilityCheck)
               .filter(SuitabilityCheck.session_question_id.in_(ids), SuitabilityCheck.status != "superseded")}
     out = {}
-    for r in rows:
-        if r.id in heads:
-            out[r.id] = (heads[r.id], public(checks.get((r.id, heads[r.id]))))
-        elif r.submitted:
-            out[r.id] = (None, None)  # sent before checks existed: keep its state, no converted result
+    for row in rows:
+        revision = heads.get(row.id)
+        check = checks.get((row.id, revision))
+        if row.submitted:
+            out[row.id] = (revision, public(check))
         else:
-            out[r.id] = (legacy_revision(r.id), legacy_pending(policy_version))
+            out[row.id] = (revision or legacy_revision(row.id),
+                           effective_check(row.latest_text, check, policy_version))
     return out
 
 
@@ -349,7 +384,7 @@ def evaluate(db, row, session, check, text) -> bool:
     check.lease_until = None
     reasons = rule_reasons(text, _recent_texts(db, row, session.id))
     model = uses_model(db, session)
-    request_topic = _personal_request_topic(_visible_text(text).strip()) if not model and not reasons else None
+    request_topic = _personal_request_topic(_visible_text(text).strip()) if not model else None
     if request_topic:
         from .objectives import session_profile
         from .storage import Course, Material

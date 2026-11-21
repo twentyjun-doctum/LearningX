@@ -1255,7 +1255,8 @@ def _dispatch_check(background_tasks, row_id, revision_id):
 def _question_response(db, row):
     head, check = fit.current(db, row.id)
     return {"id": row.id, "level": row.level, "coaching": _student_coaching(json.loads(row.latest_coaching_json)),
-            "revision_id": head.revision_id if head else None, "suitability": fit.public(check)}
+            "revision_id": head.revision_id if head else None,
+            "suitability": fit.effective_check(row.latest_text, check, check.policy_version) if check else None}
 
 
 @router.post("/sessions/{session_id}/questions", status_code=201)
@@ -1352,7 +1353,8 @@ def recheck_suitability(row_id: str, data: SuitabilityRecheck, background_tasks:
     db.refresh(row, with_for_update=True)
     if row.submitted:
         raise HTTPException(409, {"code": "already_submitted"})
-    head, check = fit.ensure_head(db, row, fit.fix_policy(db, s.id))
+    policy = fit.fix_policy(db, s.id)
+    head, check = fit.ensure_head(db, row, policy)
     if head.revision_id != data.revision_id:
         db.rollback()
         raise HTTPException(409, {"code": "stale_revision"})
@@ -1365,28 +1367,24 @@ def recheck_suitability(row_id: str, data: SuitabilityRecheck, background_tasks:
         _dispatch_check(background_tasks, row.id, head.revision_id)
     if check.status != "pending" or queued:
         notify(s.id)
-    return {"id": row.id, "revision_id": head.revision_id, "suitability": fit.public(check)}
+    return {"id": row.id, "revision_id": head.revision_id, "suitability": fit.effective_check(row.latest_text, check, policy)}
 
 
-def _submit_problem(db, row, revision_id, policy, *, require_eligible):
-    """Why a row cannot be sent now, or None. Client-sent state is never trusted."""
+def _submit_problem(db, row, revision_id, policy):
+    """Validate the current revision using the same decision exposed to students."""
     if row.submitted:
         return "already_submitted"
     head, check = fit.current(db, row.id)
-    if head is None:  # written before checks existed and never checked
-        if revision_id not in (None, fit.legacy_revision(row.id)):
-            return "stale_revision"
-        return "check_pending" if require_eligible else None
-    if revision_id is not None and head.revision_id != revision_id:
+    current_revision = head.revision_id if head else fit.legacy_revision(row.id)
+    if revision_id is not None and revision_id != current_revision:
         return "stale_revision"
-    if not require_eligible:
-        return None
-    if check is None or check.status == "pending":
-        return "check_pending"
-    if check.policy_version != policy:
-        return "policy_changed"
-    if check.status != "eligible":
+    state = fit.effective_check(row.latest_text, check, policy)
+    if state["status"] == "needs_revision":
         return "not_eligible"
+    if state["status"] != "eligible":
+        return "check_pending"
+    if state["policy_version"] != policy:
+        return "policy_changed"
     return None
 
 
@@ -1406,8 +1404,7 @@ def session_submit(row_id: str, data: SingleSubmit | None = None,
     db.refresh(row, with_for_update=True)
     if not row.submitted:
         revision_id = data.revision_id if data else None
-        problem = _submit_problem(db, row, revision_id, fit.fix_policy(db, s.id),
-                                  require_eligible=fit.enforced())
+        problem = _submit_problem(db, row, revision_id, fit.fix_policy(db, s.id))
         if problem:
             db.rollback()
             raise HTTPException(409, {"code": problem})
@@ -1439,7 +1436,7 @@ def submit_batch(session_id: str, data: SubmitBatchIn, db: Session = Depends(ses
         raise HTTPException(404, "Question not found")
     policy = fit.fix_policy(db, s.id)
     problems = [{"question_id": qid, "code": code} for qid, rid in items
-                if (code := _submit_problem(db, rows[qid], rid, policy, require_eligible=True))]
+                if (code := _submit_problem(db, rows[qid], rid, policy))]
     if problems:
         db.rollback()
         raise HTTPException(409, {"code": "batch_not_submitted", "items": problems})
@@ -1470,7 +1467,7 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
     drafts = fit.drafts_for(db, rows, policy)
     db.commit()  # the class's policy row on first read
     return {"session": _public_session(db, s),
-            "suitability": {"enforced": fit.enforced(), "policy_version": policy},
+            "suitability": {"enforced": True, "policy_version": policy},
             "items": [{"id": r.id, "slide_page": pages.get(r.id), "level": r.level, "level_label": LEVEL_LABEL[r.level],
                        "text": r.latest_text, "original": originals[r.question_id],
                        "submitted": r.submitted, "submitted_at": _iso(r.submitted_at),
