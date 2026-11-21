@@ -58,13 +58,14 @@
   <div class="composer-wrap">
     <form class="composer" id="composer" novalidate>
       <label class="sr-only" for="q-input">내 질문</label>
-      <textarea id="q-input" rows="2" maxlength="2000" placeholder="궁금한 점을 질문으로 써 보세요"></textarea>
+      <textarea id="q-input" rows="2" maxlength="2000" placeholder="궁금한 점을 질문으로 써 보세요" aria-describedby="paste-status"></textarea>
       <button class="send" type="submit" id="send" aria-label="보내기" disabled>
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12l15-7-5 15-2.5-6.5z" fill="#fff"/></svg>
       </button>
     </form>
     <div class="composer-hint"><span id="hint">다른 학생에게는 내 이름이 보이지 않아요</span>
       <button class="linkbtn" type="button" id="send-now" hidden>지금 교수자에게 보내기</button></div>
+    <p class="muted" id="paste-status" role="status"></p>
   </div>
 </div>
 

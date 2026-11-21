@@ -223,6 +223,7 @@
     setStage('seed');
     coachMsg(el('span', { text: '오늘 수업에서 궁금한 점을 질문으로 써 보세요. 먼저 내 생각대로 쓰면, 질문이 한 마디씩 자라도록 도와 드릴게요.' }));
     $('q-input').value = '';
+    $('paste-status').textContent = '';
     $('q-input').placeholder = '궁금한 점을 질문으로 써 보세요';
     updateComposer();
     $('q-input').focus();
@@ -238,8 +239,18 @@
     $('send-now').hidden = !st.current || !open;
     $('to-mine').hidden = st.sentCount === 0;
   }
+  function blockQuestionPaste(event) {
+    event.preventDefault();
+    $('paste-status').textContent = '붙여넣기는 사용할 수 없어요. 질문을 직접 입력해 주세요.';
+  }
+
+  $('q-input').addEventListener('paste', blockQuestionPaste);
+  $('q-input').addEventListener('beforeinput', event => {
+    if (event.cancelable && event.inputType === 'insertFromPaste') blockQuestionPaste(event);
+  });
   $('q-input').addEventListener('input', () => {
     const t = $('q-input');
+    $('paste-status').textContent = '';
     t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 140) + 'px';
     updateComposer();
   });
