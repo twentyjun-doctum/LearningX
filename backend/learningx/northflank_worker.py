@@ -36,9 +36,28 @@ def poll_once():
     return process_next_job(prepare_live_preview=True, renew_lease=True)
 
 
+def suitability_loop(stopped, interval=1):
+    """Question suitability checks run beside ingestion so a long ingest never delays them."""
+    from .suitability import poll_once as check_once
+    print("learningx_suitability_worker_started", flush=True)
+    while not stopped.is_set():
+        try:
+            state = check_once()
+            # Never log question text or model output; only the outcome.
+            if state != "EMPTY":
+                print("learningx_suitability " + state, flush=True)
+            wait = interval if state == "EMPTY" else 0
+        except Exception as exc:
+            print("learningx_suitability_retry " + type(exc).__name__, file=sys.stderr, flush=True)
+            wait = 10
+        stopped.wait(wait)
+
+
 def run(stop_event=None, poll_interval=None):
     validate_config()
     stopped = stop_event or threading.Event()
+    checker = threading.Thread(target=suitability_loop, args=(stopped,), name="suitability", daemon=True)
+    checker.start()
     interval = poll_interval if poll_interval is not None else int(
         os.getenv("NIT_WORKER_POLL_SECONDS", "2"))
     interval = max(2, min(int(interval), 60))
@@ -56,6 +75,7 @@ def run(stop_event=None, poll_interval=None):
             print("learningx_worker_retry " + type(exc).__name__, file=sys.stderr, flush=True)
             wait = max(interval, 10)
         stopped.wait(wait)
+    checker.join(timeout=15)
     print("learningx_worker_stopped", flush=True)
 
 

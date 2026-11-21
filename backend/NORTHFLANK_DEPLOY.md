@@ -54,6 +54,8 @@ Set these through Northflank Secret Groups (NEVER GitHub, Dockerfile, build args
 - NIT_WORKER_BACKEND: northflank_poll for both API and worker
 - NIT_WORKER_POLL_SECONDS: 2 by default for the worker (optional)
 - NIT_LLM_BASE_URL, NIT_LLM_MODEL, NIT_LLM_API_KEY: actual verified model provider configuration, server only
+  - Question suitability checks run on a thread inside the worker. When the API has a model configured, give the worker the same three values; otherwise model checks end as `check_unavailable` (students can retry). Without a model on the API, checks use rules only and clean questions are sendable.
+- NIT_QUESTION_SUITABILITY_ENFORCE: off by default. When off, sending works as before (suitability is shown and recorded only). Set to `1` on the API after previewing over-blocking and failure rates.
 
 Built into the image: NIT_HOSTED_RUNTIME=1 (no SQLite or local artifacts allowed), NIT_ENGINE_ROOT=/app/nit_engine and port 8080.
 An empty/missing DATABASE_URL causes startup failure intentionally.
