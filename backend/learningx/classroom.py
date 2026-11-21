@@ -34,6 +34,7 @@ from . import private_store
 from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, prepare_shared_page, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
+from .objectives import link_latest_profile
 from .security import actor, decode_token, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, LiveReadSession, PublishSession, SessionLocal, User, publish_engine, uid
 
@@ -330,10 +331,15 @@ def open_session(course_id: str, data: OpenSession, background_tasks: Background
     db.flush()
     first_slide = LiveSlide(session_id=s.id, page=first, total=total, version=uid(), content=json.dumps(content))
     db.add(first_slide)
-    _audit(db, user.id, course_id, "session_opened", m.id)
+    # The class keeps the material's latest approved objective profile version;
+    # without one, coaching follows the existing default flow.
+    profile = link_latest_profile(db, s.id, m.id)
+    _audit(db, user.id, course_id, "session_opened", m.id,
+           detail=f"objective_profile_version={profile.version}" if profile else "")
     db.commit()
     background_tasks.add_task(warm_live_pages, m, pages)
     return {**_public_session(db, s, faculty=True),
+            "objective_profile": {"id": profile.id, "version": profile.version} if profile else None,
             "initial_live": {"status": s.status, "slide": {**_slide_metadata(first_slide), "visible_pages": pages},
                              "index": []}}
 
