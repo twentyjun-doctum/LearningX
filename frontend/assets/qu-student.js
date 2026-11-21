@@ -3,8 +3,22 @@
    익명 토큰은 메모리에만 둡니다. 탭을 닫으면 사라집니다. */
 (() => {
   'use strict';
-  const { el, client, LEVEL, plant } = window.QU;
+  const { el, client, LEVEL, levelText, plant } = window.QU;
   const $ = (id) => document.getElementById(id);
+
+  document.addEventListener('copy', event => {
+    if (event.target?.closest?.('input, textarea') || event.target?.isContentEditable) return;
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return;
+    const protectedNodes = [...document.querySelectorAll('#student-slide [data-copy-protected]')];
+    for (let i = 0; i < selection.rangeCount; i++) {
+      const range = selection.getRangeAt(i);
+      if (protectedNodes.some(node => range.intersectsNode(node))) {
+        event.preventDefault();
+        return;
+      }
+    }
+  }, true);
 
   let token = null;
   const st = {
@@ -209,6 +223,7 @@
     setStage('seed');
     coachMsg(el('span', { text: '오늘 수업에서 궁금한 점을 질문으로 써 보세요. 먼저 내 생각대로 쓰면, 질문이 한 마디씩 자라도록 도와 드릴게요.' }));
     $('q-input').value = '';
+    $('paste-status').textContent = '';
     $('q-input').placeholder = '궁금한 점을 질문으로 써 보세요';
     updateComposer();
     $('q-input').focus();
@@ -224,8 +239,18 @@
     $('send-now').hidden = !st.current || !open;
     $('to-mine').hidden = st.sentCount === 0;
   }
+  function blockQuestionPaste(event) {
+    event.preventDefault();
+    $('paste-status').textContent = '붙여넣기는 사용할 수 없어요. 질문을 직접 입력해 주세요.';
+  }
+
+  $('q-input').addEventListener('paste', blockQuestionPaste);
+  $('q-input').addEventListener('beforeinput', event => {
+    if (event.cancelable && event.inputType === 'insertFromPaste') blockQuestionPaste(event);
+  });
   $('q-input').addEventListener('input', () => {
     const t = $('q-input');
+    $('paste-status').textContent = '';
     t.style.height = 'auto'; t.style.height = Math.min(t.scrollHeight, 140) + 'px';
     updateComposer();
   });
@@ -264,6 +289,14 @@
   });
 
   function renderCoaching(level, c) {
+    if (level === 'unassessed') {
+      // No judged level: keep the plant where it is and show the follow-up question only.
+      const parts = [el('span', { class: 'lv unassessed', text: levelText(level) }),
+        el('span', { text: '이번에는 질문 수준을 판정하지 못했어요. 아래 질문을 참고해 다듬어 보세요.' })];
+      if (c && c.follow_up_question) parts.push(el('span', {}, el('b', { text: '생각해 볼 질문 · ' }), c.follow_up_question));
+      coachMsg(...parts);
+      return;
+    }
     const grew = RANK[level] > RANK[st.stage];
     if (grew) {
       const chip = el('div', { class: 'growth' });
@@ -272,7 +305,7 @@
     }
     setStage(level);
 
-    const parts = [el('span', { class: `lv ${level}`, text: `${LEVEL[level]} 질문` })];
+    const parts = [el('span', { class: `lv ${level}`, text: levelText(level) })];
     if (c && c.feedback) parts.push(el('span', { text: c.feedback }));
     if (c && c.follow_up_question) parts.push(el('span', {}, el('b', { text: '생각해 볼 질문 · ' }), c.follow_up_question));
     if (!c || (!c.feedback && !c.follow_up_question)) {
@@ -329,7 +362,7 @@
     showScreen('sent');
     const card = $('sent-card');
     card.replaceChildren(
-      el('span', { class: `lv ${res.level}`, text: `${LEVEL[res.level]} 질문` }),
+      el('span', { class: `lv ${res.level}`, text: levelText(res.level) }),
       el('b', { text: res.text }),
       res.original && res.original !== res.text ? el('span', { class: 'muted', text: `처음 질문: ${res.original}` }) : null);
     $('sent-mine').textContent = `내가 보낸 질문 ${st.sentCount}개`;
@@ -367,7 +400,7 @@
       return;
     }
     $('mine-list').replaceChildren(...sent.map((q) => el('div', { class: 'sent-card', id: 'my-indexed-' + q.id },
-      el('div', { class: 'row between' }, el('span', { class: `lv ${q.level}`, text: `${q.level_label} 질문` }),
+      el('div', { class: 'row between' }, el('span', { class: `lv ${q.level}`, text: levelText(q.level) }),
         el('span', { class: 'muted', text: q.submitted_at ? new Date(q.submitted_at).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }) : '' })),
       el('span', {class: 'muted', text: [q.slide_page ? q.slide_page + '쪽' : '', q.submitted ? '전송됨' : '작성 중'].filter(Boolean).join(' · ')}),
       q.original !== q.text ? el('span' , { class: 'muted', text: `처음 질문 · ${q.original}` }) : null,

@@ -3,7 +3,7 @@
    토큰은 메모리에만 둡니다. 새로고침하면 현재 체험 수업 관리 세션이 종료됩니다. */
 (() => {
   'use strict';
-  const { el, client, LEVEL, relTime, liveMark, liveTimingEnabled } = window.QU;
+  const { el, client, LEVEL, levelText, relTime, liveMark, liveTimingEnabled } = window.QU;
   const $ = (id) => document.getElementById(id);
 
   const MAX_APPROVAL_ITEMS = 1000;
@@ -632,7 +632,7 @@
     live.boardLoaded = true;
     paintLiveHeader();
     if (!proj.hidden && !proj.classList.contains('code-mode')) paintProjected(live);
-    for (const k of ['all', 'deep', 'mid', 'shallow']) {
+    for (const k of ['all', 'deep', 'mid', 'shallow', 'unassessed']) {
       const n = $('level-filter').querySelector(`[data-count="${k}"]`);
       if (n) n.textContent = String(data.counts[k] || 0);
     }
@@ -648,7 +648,8 @@
     if (!items.length) {
       board.replaceChildren(el('div', { class: 'empty' },
         live.level === 'all' ? '아직 들어온 질문이 없어요. 학생들이 코드로 입장해 질문을 다듬고 보내면 여기에 나타납니다.'
-          : `${LEVEL[live.level]} 수준 질문이 아직 없어요.`));
+          : live.level === 'unassessed' ? '수준 판정이 보류된 질문이 아직 없어요.'
+            : `${LEVEL[live.level]} 수준 질문이 아직 없어요.`));
       return;
     }
     board.replaceChildren(...items.map((q) => {
@@ -666,7 +667,7 @@
         el('p', { class: 'q', text: q.text }),
         q.original ? el('p', { class: 'orig', text: `처음 질문: ${q.original}` }) : null,
         el('div', { class: 'meta' },
-          el('span', { class: `lv ${q.level}`, text: `${q.level_label} 질문` }),
+          el('span', { class: `lv ${q.level}`, text: levelText(q.level) }),
           q.original ? el('span', { text: '다시 씀' }) : null,
           el('span', { text: relTime(q.submitted_at) }),
           q.hidden ? el('span', { text: '숨김' }) : null,
@@ -775,7 +776,7 @@
     const items = live.items.filter(q => !q.hidden);
     const index = items.findIndex(q => q.id === live.projectorItem);
     const item = items[index];
-    $('proj-label').textContent = item ? `${item.level_label} 질문` : '학생 질문';
+    $('proj-label').textContent = item && item.level !== 'unassessed' ? `${item.level_label} 질문` : '학생 질문';
     $('proj-text').textContent = item ? item.text : '띄울 질문이 없습니다.';
     $('proj-meta').textContent = item && item.original ? `처음 질문: ${item.original}` : '이름 없이 들어온 질문입니다.';
     const canMove = items.length > 1;
