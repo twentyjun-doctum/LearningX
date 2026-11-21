@@ -115,6 +115,21 @@ class SlideConfusionArea(Base):
     rectangles: Mapped[str] = mapped_column(Text)
 
 
+class SlideConfusionGeneration(Base):
+    __tablename__ = "slide_confusion_generations"
+    session_id: Mapped[str] = mapped_column(ForeignKey("class_sessions.id"), primary_key=True)
+    page: Mapped[int] = mapped_column(Integer, primary_key=True)
+    student_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    tag_id: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+def _confusion_tag(vote, generation):
+    if generation is not None:
+        return generation
+    legacy = f"{vote.session_id}:{vote.page}:{vote.student_id}"
+    return hashlib.sha256(legacy.encode()).hexdigest()
+
+
 class QuestionAnchor(Base):
     __tablename__ = "question_anchors"
     question_id: Mapped[str] = mapped_column(ForeignKey("session_questions.id"), primary_key=True)
@@ -589,19 +604,32 @@ def _snapshot(db, current, user, faculty, version, cursor=None):
     confusion = None
     if slide:
         votes = db.query(SlideConfusion).filter_by(session_id=session_id, page=slide.page)
-        group_query = votes.outerjoin(SlideConfusionArea, (
-            (SlideConfusion.session_id == SlideConfusionArea.session_id)
+        vote_rows = votes.outerjoin(
+            SlideConfusionArea, (SlideConfusion.session_id == SlideConfusionArea.session_id)
             & (SlideConfusion.page == SlideConfusionArea.page)
-            & (SlideConfusion.student_id == SlideConfusionArea.student_id)
-        )).with_entities(SlideConfusion.x, SlideConfusion.y, func.count(),
-                         func.min(SlideConfusionArea.rectangles)).group_by(SlideConfusion.x, SlideConfusion.y)
-        groups = (group_query if faculty else group_query.filter(SlideConfusion.student_id == user.id)).all()
-        if faculty or groups:
-            confusion = {"count": sum(count for _, _, count, _ in groups)} if faculty else {"mine": True}
-            confusion["spots"] = [
-                {"x": x / 20, "y": y / 20, "count": count, **({"rects": json.loads(rects)} if rects else {})}
-                for x, y, count, rects in groups if x is not None
-            ]
+            & (SlideConfusion.student_id == SlideConfusionArea.student_id),
+        ).outerjoin(
+            SlideConfusionGeneration, (SlideConfusion.session_id == SlideConfusionGeneration.session_id)
+            & (SlideConfusion.page == SlideConfusionGeneration.page)
+            & (SlideConfusion.student_id == SlideConfusionGeneration.student_id),
+        ).with_entities(SlideConfusion, SlideConfusionArea.rectangles, SlideConfusionGeneration.tag_id)
+        rows = (vote_rows if faculty else vote_rows.filter(SlideConfusion.student_id == user.id)).all()
+        if faculty or rows:
+            confusion = {"count": len(rows)} if faculty else {"mine": True}
+            spots = {}
+            for vote, rects, generation in rows:
+                cell = (vote.x, vote.y) if vote.x is not None else (-1, -1)
+                x, y = (vote.x / 20, vote.y / 20) if vote.x is not None else (.05, .08)
+                spot = spots.setdefault(cell, {"x": x, "y": y, "count": 0, "tag_ids": []})
+                spot["count"] += 1
+                spot["tag_ids"].append(_confusion_tag(vote, generation))
+                if rects and ("rects_json" not in spot or rects < spot["rects_json"]):
+                    spot["rects_json"] = rects
+            for spot in spots.values():
+                spot["tag_ids"].sort()
+                if "rects_json" in spot:
+                    spot["rects"] = json.loads(spot.pop("rects_json"))
+            confusion["spots"] = [spots[key] for key in sorted(spots)]
     snapshot = _slide_metadata(slide, version)
     if not faculty:
         snapshot = _student_slide(snapshot)
@@ -1134,6 +1162,7 @@ def flag_confusion(session_id: str, data: ConfusionRequest, db: Session = Depend
     if vote and (vote.x, vote.y) == (x, y) and (area.rectangles if area else None) == rects:
         return {"page": data.page}
     db.merge(SlideConfusion(session_id=session_id, page=data.page, student_id=user.id, x=x, y=y))
+    db.merge(SlideConfusionGeneration(session_id=session_id, page=data.page, student_id=user.id, tag_id=uid()))
     if rects:
         db.merge(SlideConfusionArea(session_id=session_id, page=data.page, student_id=user.id, rectangles=rects))
     elif area:
@@ -1141,6 +1170,45 @@ def flag_confusion(session_id: str, data: ConfusionRequest, db: Session = Depend
     db.commit()
     notify(session_id)
     return {"page": data.page}
+
+
+class ConfusionAcknowledgement(BaseModel):
+    page: int = Field(ge=1)
+    version: str = Field(min_length=1, max_length=64)
+    tag_ids: list[str] = Field(min_length=1, max_length=5000)
+
+
+@router.post("/sessions/{session_id}/live/confusion/acknowledge")
+def acknowledge_confusion(session_id: str, data: ConfusionAcknowledgement,
+                          credentials: HTTPAuthorizationCredentials | None = Depends(scheme),
+                          db: Session = Depends(session)):
+    # Use the same lock as tag updates, session closure, and page publishing.
+    locked = db.execute(select(ClassSession.id).where(ClassSession.id == session_id)
+                        .with_for_update()).scalar_one_or_none()
+    if locked is None:
+        raise HTTPException(404, "Session not found")
+    user, current, faculty, slide, _ = _live_reader(db, credentials, session_id, include_page=True)
+    if current.status == "CLOSED" or not slide or slide.version != data.version or slide.page != data.page:
+        raise HTTPException(409, "This page is no longer being shared")
+    votes = db.query(SlideConfusion, SlideConfusionGeneration.tag_id).outerjoin(
+        SlideConfusionGeneration, (SlideConfusion.session_id == SlideConfusionGeneration.session_id)
+        & (SlideConfusion.page == SlideConfusionGeneration.page)
+        & (SlideConfusion.student_id == SlideConfusionGeneration.student_id),
+    ).filter(SlideConfusion.session_id == session_id, SlideConfusion.page == data.page)
+    if not faculty:
+        votes = votes.filter(SlideConfusion.student_id == user.id)
+    target_ids = set(data.tag_ids)
+    students = [vote.student_id for vote, generation in votes
+                if _confusion_tag(vote, generation) in target_ids]
+    removed = len(students)
+    if students:
+        for model in (SlideConfusionArea, SlideConfusionGeneration, SlideConfusion):
+            db.query(model).filter(model.session_id == session_id, model.page == data.page,
+                                   model.student_id.in_(students)).delete(synchronize_session=False)
+    db.commit()
+    if removed:
+        notify(session_id)
+    return {"removed": removed}
 
 
 @router.post("/sessions/{session_id}/questions", status_code=201)

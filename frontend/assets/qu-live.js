@@ -291,7 +291,7 @@
         }
       }
       const current = displayed === slide?.page ? confusion : null;
-      const markState = JSON.stringify([displayed, current, picked, visible.map(item => [item.id, item.level, item.anchor])]);
+      const markState = JSON.stringify([displayed, slide?.version, current, picked, visible.map(item => [item.id, item.level, item.anchor])]);
       const frame = content.querySelector('.live-pdf');
       if (confusionSummary) confusionSummary.textContent = displayed ? '헷갈려요 · ' + (current?.count ?? 0) + '명' : '';
       if (confusedButton) {
@@ -302,7 +302,7 @@
       if (!frame || markState === marksKey) return;
       marksKey = markState;
       frame.querySelector('.live-marks')?.remove();
-      const layer = el('div', {class: 'live-marks', 'aria-hidden': 'true'});
+      const layer = el('div', {class: 'live-marks'});
       const pins = [...(current?.spots ?? []).map(spot => ({...spot, level: 'confused'})),
         ...visible.map((item, number) => item.anchor ? {...item.anchor, level: item.level, count: number + 1} : null).filter(Boolean)];
       if (picked) pins.push({...picked, level: 'picked'});
@@ -322,7 +322,9 @@
           highlights.get(pin.level).append(highlight);
         }
         const corner = pin.level === 'confused' && pin.rects?.length;
-        const marker = el('span', {class: 'live-mark ' + pin.level + (corner ? ' at-selection-corner' : ''), text: pin.count ?? ''});
+        const canAcknowledge = pin.tag_ids?.length && slide?.version;
+        const marker = el('span', {class: 'live-mark ' + pin.level + (corner ? ' at-selection-corner' : ''),
+          text: pin.count ?? '', 'aria-hidden': canAcknowledge ? undefined : 'true'});
         if (corner) {
           const first = pin.rects.reduce((top, rect) => rect.top < top.top ? rect : top);
           const lineMiddle = (first.top + first.bottom) / 2;
@@ -333,6 +335,46 @@
         } else {
           marker.style.left = (pin.x * 100) + '%';
           marker.style.top = (pin.y * 100) + '%';
+        }
+        if (canAcknowledge) {
+          const target = {page: displayed, version: slide.version, tag_ids: pin.tag_ids};
+          marker.classList.add('acknowledgeable');
+          marker.textContent = '';
+          const toggle = el('button', {type: 'button', class: 'live-mark-toggle', text: pin.count,
+            'aria-label': '헷갈려요 ' + pin.count + '건', 'aria-expanded': 'false'});
+          const confirm = el('button', {type: 'button', class: 'live-mark-confirm', text: '확인',
+            'aria-label': '이 위치의 헷갈려요 ' + pin.count + '건 확인'});
+          toggle.addEventListener('click', () => {
+            marker.classList.remove('dismissed');
+            const expanded = marker.classList.toggle('expanded');
+            toggle.setAttribute('aria-expanded', String(expanded));
+          });
+          marker.addEventListener('pointerdown', event => event.stopPropagation());
+          marker.addEventListener('click', event => event.stopPropagation());
+          marker.addEventListener('keydown', event => {
+            if (event.key !== 'Escape') return;
+            marker.classList.remove('expanded');
+            marker.classList.add('dismissed');
+            toggle.setAttribute('aria-expanded', 'false');
+            toggle.focus();
+          });
+          marker.addEventListener('pointerleave', () => marker.classList.remove('dismissed'));
+          marker.addEventListener('focusout', event => {
+            if (!marker.contains(event.relatedTarget)) marker.classList.remove('dismissed');
+          });
+          confirm.addEventListener('click', async () => {
+            confirm.disabled = true;
+            try {
+              await api(path + '/confusion/acknowledge', {method: 'POST', body: target});
+            } catch (error) {
+              if (!stopped && slide?.version === target.version) {
+                status.textContent = error.status === 409 ? '송출 쪽이 바뀌었어요.' : '확인 처리에 실패했어요. 다시 시도해 주세요.';
+              }
+            } finally {
+              confirm.disabled = false;
+            }
+          });
+          marker.append(toggle, confirm);
         }
         layer.append(marker);
       }

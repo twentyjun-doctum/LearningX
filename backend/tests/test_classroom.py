@@ -101,14 +101,16 @@ class ClassroomTests(unittest.TestCase):
         for _ in range(2):
             self.assertEqual(self.req("PUT", reaction, first, json={"page": 2, "anchor": anchor}).status_code, 200)
         summary = self.req("GET", path + "/live", self.tf).json()["confusion"]
-        self.assertEqual(summary, {"count": 1, "spots": [{"x": .3, "y": .5, "count": 1, "rects": anchor["rects"]}]})
+        tag_id = summary["spots"][0]["tag_ids"][0]
+        self.assertTrue(tag_id)
+        self.assertEqual(summary, {"count": 1, "spots": [{"x": .3, "y": .5, "count": 1, "rects": anchor["rects"], "tag_ids": [tag_id]}]})
         self.assertIsNone(self.req("GET", path + "/live", second).json()["confusion"])
         self.assertTrue(self.req("GET", path + "/live", first).json()["confusion"]["mine"])
         self.assertEqual(self.req("PUT", reaction, first, json={"page": 1, "anchor": anchor}).status_code, 200)
         with patch.object(classroom, "build_snapshot", return_value=(3, {"text": "Shared slide"})):
             for page in (1, 2):
                 self.assertEqual(self.req("PUT", path + "/live", self.tf, json={"page": page}).status_code, 200)
-                self.assertEqual(self.req("GET", path + "/live", self.tf).json()["confusion"], summary)
+                self.assertEqual(self.req("GET", path + "/live", self.tf).json()["confusion"]["count"], 1)
         with patch.object(nit, "coach_question", return_value=coaching("analyze")):
             question = self.req("POST", path + "/questions", first,
                                 json={"question": "질문의 근거는 무엇인가요?", "slide_page": 1, "anchor": anchor}).json()
@@ -122,6 +124,19 @@ class ClassroomTests(unittest.TestCase):
         self.assertEqual(live["index"], expected)
         self.assertNotIn("index", self.req("GET", path + "/live", self.tf,
                                            params={"index_version": live["index_version"]}).json())
+        acknowledge = reaction + "/acknowledge"
+        payload = {"page": 2, "version": live["slide"]["version"], "tag_ids": [tag_id]}
+        self.assertEqual(self.req("POST", acknowledge, self.tf, json={**payload, "version": "stale"}).status_code, 409)
+        self.assertEqual(self.req("POST", acknowledge, second, json=payload).json()["removed"], 0)
+        self.assertEqual(self.req("PUT", reaction, second, json={"page": 2, "anchor": anchor}).status_code, 200)
+        self.assertEqual(self.req("POST", acknowledge, self.tf, json=payload).json()["removed"], 1)
+        self.assertEqual(self.req("POST", acknowledge, self.tf, json=payload).json()["removed"], 0)
+        self.assertIsNone(self.req("GET", path + "/live", first).json()["confusion"])
+        own = self.req("GET", path + "/live", second).json()["confusion"]["spots"][0]["tag_ids"]
+        self.assertEqual(self.req("POST", acknowledge, second, json={**payload, "tag_ids": own}).json()["removed"], 1)
+        updated = self.req("GET", path + "/live", self.tf).json()
+        self.assertEqual(updated["confusion"]["count"], 0)
+        self.assertEqual(updated["index"], expected)
         self.req("POST", f"/v1/session-questions/{question['id']}/hide", self.tf)
         self.assertEqual(self.req("GET", path + "/live", self.tf).json()["index"], [])
         self.req("PUT", path + "/state", self.tf, json={"status": "CLOSED"})
