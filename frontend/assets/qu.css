@@ -367,3 +367,31 @@ html:has(#student-slide.live-expanded) {overflow:hidden;}
 #student-slide:is(:fullscreen, .live-expanded) .selection-actions [data-live-feedback] {
   font-size: .75rem;
 }
+
+/* Unit learning objective panel (review/approval step). Selected values carry a ✓ and text, not color alone. */
+.objective-panel>summary{cursor:pointer;display:flex;flex-wrap:wrap;gap:8px;align-items:baseline;list-style:none}
+.objective-panel>summary::-webkit-details-marker{display:none}
+.objective-panel>summary::before{content:'▸';color:var(--text-muted)}
+.objective-panel[open]>summary::before{content:'▾'}
+.objective-panel>summary:focus-visible{outline:2px solid var(--primary);outline-offset:3px;border-radius:6px}
+.objective-panel [data-objective-body]{margin-top:12px}
+.objective-status:empty{display:none}
+.obj-steps{border:0;padding:0;margin:0}
+.obj-steps legend{font-weight:600;margin-bottom:6px}
+.obj-step-row{display:flex;flex-wrap:wrap;gap:6px}
+.obj-step{position:relative;display:inline-flex;align-items:center;min-height:40px;padding:0 14px;border-radius:999px;
+  border:1px solid var(--border-strong);background:var(--surface);cursor:pointer}
+.obj-step input{position:absolute;opacity:0;inset:0;margin:0;cursor:pointer}
+.obj-step.is-on{background:var(--primary-soft);border-color:var(--primary);color:var(--primary-strong);font-weight:600}
+.obj-step:has(input:focus-visible){outline:2px solid var(--primary);outline-offset:2px}
+.obj-current{margin:6px 0 0;color:var(--text-sub)}
+.obj-optional>summary{cursor:pointer;color:var(--text-sub)}
+.obj-item,.obj-proposal{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.obj-item .input{flex:1;min-width:200px}
+.obj-kind{font-size:12px;font-weight:600;padding:2px 8px;border-radius:999px;background:var(--surface-subtle);color:var(--text-sub)}
+.obj-proposal.held .obj-kind{background:var(--warn-soft);color:var(--warn-strong)}
+.obj-proposal.conflict{padding:8px;border-radius:8px;background:var(--surface-subtle)}
+.obj-preview{display:grid;grid-template-columns:max-content 1fr;gap:4px 12px;margin:0}
+.obj-preview dt{color:var(--text-muted)}
+.obj-preview dd{margin:0}
+.obj-actions{gap:8px;align-items:center}

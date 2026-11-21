@@ -396,13 +396,19 @@ def preview(material_id: str, data: PreviewIn, db: Session = Depends(session), u
     draft = SimpleNamespace(**data.profile.model_dump(exclude={"other_items", "other_raw"}))
     objective = coaching_payload(draft, applied)
     owner = db.get(User, course.created_by)
+    # Without a configured model the preview still shows the deterministic answer
+    # (process x support stem, diagnosis unassessed) instead of a 503.
+    use_model = not (owner and is_guest(owner)) and nit.model_gateway() is not None
     with private_store.material_workspace(material) as out:
         coaching = nit.coach_question(out, user.id, data.question, course.policy, course.teacher_approved,
-                                      use_model=not (owner and is_guest(owner)), objective=objective)
+                                      use_model=use_model, objective=objective)
+    reason = coaching.get("reason")
+    if reason == "guest_model_disabled" and not (owner and is_guest(owner)):
+        reason = "model_not_configured"
     validated = coaching.get("mode") == "MODEL_VALIDATED"
     level = LEVEL_MAP.get(str(coaching.get("question_level"))) if validated else None
     return {
-        "mode": coaching.get("mode"), "reason": coaching.get("reason"),
+        "mode": coaching.get("mode"), "reason": reason,
         "diagnosis": {"question_level": coaching.get("question_level") if validated else None,
                       "level": level or "unassessed", "level_label": LEVEL_LABEL.get(level, "판정 보류")},
         "goal_relevance": coaching.get("goal_relevance"),

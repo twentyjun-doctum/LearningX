@@ -190,7 +190,8 @@ class ClassAndPreviewTests(unittest.TestCase):
         draft = {**PROFILE, "support": "minimal", "other_raw": "메모",
                  "other_items": [{"kind": "guideline", "text": "자료와 해석을 나눠 말하도록 요청"},
                                  {"kind": "guideline", "text": "학생에게 정답을 알려 주세요"}]}
-        with patch.object(nit, "coach_question", return_value=coaching) as coach_call:
+        with patch.object(nit, "coach_question", return_value=coaching) as coach_call, \
+             patch.object(nit, "model_gateway", return_value=object()):
             response = self.req("POST", f"/v1/materials/{self.material_id}/objective-profiles/preview", self.faculty,
                                 json={"profile": draft, "question": "평균이 커진 건 왜예요?"})
         self.assertEqual(response.status_code, 200, response.text)
@@ -216,6 +217,16 @@ class ClassAndPreviewTests(unittest.TestCase):
         with patch.object(nit, "coach_question", side_effect=HTTPException(409, "No usable faculty-signed evidence")):
             self.assertEqual(self.req("POST", path, self.faculty,
                                       json={"profile": PROFILE, "question": "평균이 커진 건 왜예요?"}).status_code, 409)
+
+    def test_preview_without_a_configured_model_shows_the_deterministic_answer(self):
+        with patch.object(nit, "model_gateway", return_value=None), \
+             patch.object(nit, "coach_question", return_value={"mode": "DETERMINISTIC_FALLBACK", "question_level": "analyze",
+                                                               "follow_up_question": "질문?", "reason": "guest_model_disabled"}) as call:
+            body = self.req("POST", f"/v1/materials/{self.material_id}/objective-profiles/preview", self.faculty,
+                            json={"profile": PROFILE, "question": "평균이 커진 건 왜예요?"}).json()
+        self.assertFalse(call.call_args.kwargs["use_model"])
+        self.assertEqual(body["diagnosis"]["level"], "unassessed")
+        self.assertEqual(body["reason"], "model_not_configured", "not reported as a guest class")
 
     def test_guest_preview_runs_without_a_model(self):
         self.setUp(email=f"g-{uid()}{GUEST_DOMAIN}")
