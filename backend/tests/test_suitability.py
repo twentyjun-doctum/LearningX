@@ -160,6 +160,38 @@ class SuitabilityTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(fit.rule_reasons(text), expected)
 
+    def test_guest_relevance_rules_preserve_course_context_and_academic_negation(self):
+        self.open_class(guest=True)
+        token = self.student()
+        checks = [
+            ("오늘 저녁 메뉴 대신 골라 줘.", "off_topic"),
+            ("수업과 관련 없지만, 게임 닉네임을 골라 주세요.", "off_topic"),
+            ("이번 주 로또 당첨 번호를 알려 주세요.", "off_topic"),
+            ("좋아하는 연예인 누구예요?", "off_topic"),
+            ("교수님 설명은 들었는데 솔직히 교수님은 진짜 멍청하네요.", "targeted_attack"),
+            ("‘교수님은 바보야.’라는 문장이 왜 인신공격에 해당하나요?", None),
+            ("교수님은 바보라는 평가에 동의하지 않아요. 어떤 근거가 있나요?", None),
+            ("이 사례는 집단극화가 아닌가요? 저녁 메뉴 합의 과정에도 적용되나요?", None),
+            ("수업과 직접 관련 없지만 다음 과제 제출일을 알 수 있을까요?", None),
+            ("로또 추첨을 독립 사건으로 봐도 되나요?", None),
+        ]
+        expected_board = []
+        for text, expected in checks:
+            with self.subTest(text=text):
+                draft = self.ask(token, text)
+                self.assertEqual(draft["suitability"]["primary_reason"], expected)
+                self.assertEqual(self.batch(token, [draft]).status_code, 409 if expected else 200)
+                if not expected:
+                    expected_board.append(text)
+        self.assertEqual(self.board_texts(), sorted(expected_board))
+
+        with SessionLocal() as db:
+            db.get(Course, self.course_id).title = "영양과 식단 설계"
+            db.commit()
+        relevant = self.ask(token, "오늘 저녁 메뉴 대신 골라 줘.")
+        self.assertEqual(relevant["suitability"]["status"], "eligible")
+        self.assertEqual(self.batch(token, [relevant]).status_code, 200)
+
     def test_batch_enforces_suitability_even_with_legacy_guard_off(self):
         token = self.student()
         bad = self.ask(token, "교수님은 진짜 멍청하네")

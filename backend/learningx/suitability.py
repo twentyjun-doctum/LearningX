@@ -128,10 +128,31 @@ _PRIVATE_REQUEST = re.compile(
     r"(?:개인\s*)?(?:집\s*주소|휴대\s*전화\s*번호|핸드폰\s*번호|주민\s*등록\s*번호|비밀번호)"
     r"(?:가|는|를| 좀)?\s*(?:뭐예요|뭔가요|뭐야|뭐임|어디(?:예요|인가요|야)|알려\s*(?:줘|주세요)|보내\s*(?:줘|주세요))"
 )
+_QUOTED_EXAMPLE = re.compile(r'“[^”\n]+”|‘[^’\n]+’|"[^"\n]+"|\'[^\'\n]+\'')
 _DIRECT_ATTACK = re.compile(
-    r"^(?:야[,\s]+)?(?:교수님|교수|선생님|조교님|너)(?:은|는|이|가|도)?[,\s]+"
-    r"(?:진짜\s+|완전\s+)?(?:개?멍청(?:이|하네요?|하다|해요?|하냐|하세요)|개?바보(?:야|냐|네요|예요)?|"
-    r"병신(?:이야|이냐|이네요)?|꺼져(?:라)?|죽어(?:라)?)(?:[.!?…\sㅋㅎ]+)?$"
+    r"(?<!\w)(?:교수님|교수|선생님|조교님|넌|너|쟤|저\s*학생)(?:은|는|이|가|도)?[,\s]+"
+    r"(?:(?:진짜|정말|완전|솔직히)\s+)*"
+    r"(?:개?멍청(?:이(?:야|네요)?|하네요?|하다|해요?|하냐|하세요)|개?바보(?:야|냐|네요|예요)?|"
+    r"병신(?:이야|이냐|이네요)?|꺼져(?:라)?|죽어(?:라)?)(?=$|[.!?…])"
+)
+# A narrow topic plus a personal recommendation or prediction request. These topic
+# patterns also recognize relevant course titles and approved learning objectives.
+_PERSONAL_TOPICS = tuple(re.compile(topic) for topic in (
+    r"(?:(?:오늘\s*)?(?:저녁|점심|아침)\s*(?:메뉴|뭐\s*먹)|야식|배달\s*메뉴|맛집|식단|영양|외식|조리)",
+    r"(?:로또|복권|토토|도박)",
+    r"(?:좋아하는\s*(?:연예인|아이돌)|연예인|대중\s*문화|아이돌)",
+    r"(?:게임\s*(?:닉네임|캐릭터|아이템)|게임\s*기획|게임\s*디자인)",
+))
+_PERSONAL_REQUESTS = tuple(re.compile(request) for request in (
+    r"(?:오늘\s*)?(?:(?:저녁|점심|아침|야식|배달)\s*메뉴|맛집)(?:을|를)?\s*(?:대신\s*)?"
+    r"(?:골라\s*(?:줘요?|주세요)|추천\s*(?:해\s*)?(?:줘요?|주세요)|뭐가\s*좋아요)",
+    r"(?:이번\s*주\s*)?(?:로또|복권)\s*(?:당첨\s*)?번호(?:를)?\s*(?:추천|예측|알려)\s*(?:해\s*)?(?:줘요?|주세요)",
+    r"(?:(?:교수님|선생님)(?:이|은|는)?\s+)?좋아하는\s*(?:연예인|아이돌)(?:이|은|는)?\s*(?:누구예요|누구인가요|누구야)",
+    r"게임\s*(?:닉네임|캐릭터|아이템)(?:을|를)?\s*(?:대신\s*)?(?:골라|추천\s*해)\s*(?:줘요?|주세요)",
+))
+_REQUEST_PREFACE = re.compile(
+    r"^(?:수업(?:과|이랑)\s*(?:상관|관련)\s*(?:없지만|없는\s*질문인데)[,\s]*|"
+    r"그냥\s*궁금한데[,\s]*)"
 )
 _NOISE = re.compile(r"^[ㅋㅎㅠㅜᄏ휴ᅮ!?.,…~\s]+$")
 _PROMO_REQUEST = re.compile(
@@ -148,13 +169,21 @@ def normalize(text: str) -> str:
     return re.sub(r"[\s\W_]+", "", text)
 
 
+def _personal_request_topic(text: str):
+    request = _REQUEST_PREFACE.sub("", text).rstrip(".!?… ")
+    for pattern, topic in zip(_PERSONAL_REQUESTS, _PERSONAL_TOPICS, strict=True):
+        if pattern.fullmatch(request):
+            return topic
+    return None
+
+
 def rule_reasons(text: str, recent_texts=()) -> list[str]:
     """Only verifiable patterns. A slur list or failed evidence search never decides here."""
     text = _visible_text(text).strip()
     reasons = []
     if _PHONE.search(text) or _EMAIL.search(text) or _RRN.search(text) or _PRIVATE_REQUEST.search(text):
         reasons.append("personal_or_private")
-    if _DIRECT_ATTACK.fullmatch(text):
+    if _DIRECT_ATTACK.search(_QUOTED_EXAMPLE.sub(" ", text)):
         reasons.append("targeted_attack")
     if (_PROMO_LINK.search(text) or (_URL.search(text) and _PROMO_WORD.search(text))
             or _PROMO_REQUEST.search(text) or _NOISE.fullmatch(text)):
@@ -320,6 +349,19 @@ def evaluate(db, row, session, check, text) -> bool:
     check.lease_until = None
     reasons = rule_reasons(text, _recent_texts(db, row, session.id))
     model = uses_model(db, session)
+    request_topic = _personal_request_topic(_visible_text(text).strip()) if not model and not reasons else None
+    if request_topic:
+        from .objectives import session_profile
+        from .storage import Course, Material
+        course = db.get(Course, session.course_id)
+        material = db.get(Material, session.material_id)
+        profile = session_profile(db, session.id)
+        topics = [course.title if course else "", material.filename if material else ""]
+        if profile:
+            topics.append(profile.objective)
+            topics.extend(item["text"] for item in json.loads(profile.other_items) if item["kind"] == "goal")
+        if not any(request_topic.search(_visible_text(item)) for item in topics):
+            reasons.append("off_topic")
     check.mode = "model" if model else "rules"
     if reasons:
         check.status, check.reason_codes, check.checked_at = "needs_revision", json.dumps(ordered(reasons)), now()
