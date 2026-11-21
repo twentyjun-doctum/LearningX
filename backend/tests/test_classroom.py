@@ -169,11 +169,17 @@ class ClassroomTests(unittest.TestCase):
         self.assertTrue((parsed / "live-pages/3.pdf").is_file())
         initial = self.req("GET", path, student).json()
         self.assertEqual(initial["slide"]["page"], 1)
-        self.assertEqual(initial["slide"]["after"], 3)
+        # Students receive the current page only: no neighbour page numbers.
+        self.assertNotIn("after", initial["slide"])
+        self.assertNotIn("before", initial["slide"])
+        self.assertEqual(self.req("GET", path, self.tf).json()["slide"]["after"], 3)
         prefetch = path + "/page/" + initial["slide"]["version"]
-        for page in (2, 4):
+        for page in (2, 3, 4):
             self.assertEqual(self.req("GET", prefetch, student, params={"page": page}).status_code, 403)
-        next_pdf = self.req("GET", prefetch, student, params={"page": 3})
+        # The presenter keeps neighbour prefetch for navigation.
+        for page in (2, 4):
+            self.assertEqual(self.req("GET", prefetch, self.tf, params={"page": page}).status_code, 403)
+        next_pdf = self.req("GET", prefetch, self.tf, params={"page": 3})
         with pymupdf.open(stream=next_pdf.content, filetype="pdf") as pdf:
             self.assertEqual(pdf[0].get_text().strip(), "Next slide text")
         batch = {"pages": [3, 1, 3], "batch_id": "6e2f3169-9826-42cd-82ec-fb3748478933",
@@ -190,13 +196,17 @@ class ClassroomTests(unittest.TestCase):
         current = self.req("GET", path, student, params={"version": first_publish.json()["version"]})
         self.assertIn("snapshot;dur=", current.headers["server-timing"])
         self.assertEqual(current.json()["slide"]["sequence"], 4)
-        ordered = self.req("GET", path, student, params={"cursor": initial["slide"]["version"]}).json()["transitions"]
+        # Past transitions are presenter catch-up data; students never receive them.
+        cursor = {"cursor": initial["slide"]["version"]}
+        self.assertEqual(self.req("GET", path, student, params=cursor).json()["transitions"], [])
+        ordered = self.req("GET", path, self.tf, params=cursor).json()["transitions"]
         self.assertEqual([item["page"] for item in ordered], [3, 1, 3])
         old_page = path + "/page/" + ordered[0]["version"]
-        historical = self.req("GET", old_page, student)
+        self.assertEqual(self.req("GET", old_page, student).status_code, 409)
+        historical = self.req("GET", old_page, self.tf)
         self.assertEqual(historical.status_code, 200)
         self.assertIn("pdf;dur=", historical.headers["server-timing"])
-        self.assertEqual(self.req("GET", old_page, student, params={"page": 4}).status_code, 403)
+        self.assertEqual(self.req("GET", old_page, self.tf, params={"page": 4}).status_code, 403)
         before = initial["revision"]
         self.assertEqual(self.req("PUT", path, self.tf, json={"page": 1}).status_code, 200)
         state = self.req("GET", path, student, params={"after": before}).json()

@@ -476,7 +476,7 @@ def _read_live(request, credentials, session_id, version, cursor, queued, *, acc
         if partial_page and not faculty and current.status == "OPEN" and page_data:
             current_slide, material = page_data
             if current_slide is not None and current_slide.version != version:
-                slide = _slide_metadata(current_slide, version)
+                slide = _student_slide(_slide_metadata(current_slide, version))
                 prepared = cached_live_page(material, slide["page"]) if slide.get("pdf") else None
                 if prepared and len(prepared) <= MAX_INLINE_PAGE_BYTES:
                     record_phase(request, "partial_page", started)
@@ -521,6 +521,18 @@ async def live_snapshot(session_id: str, request: Request, response: Response, v
                         media_type=LIVE_PAGE_CONTENT_TYPE,
                         headers={"Cache-Control": "no-store", "X-Content-Type-Options": "nosniff"})
     return result
+
+
+# Students receive only what the current page needs. Neighbour page numbers and
+# past transitions are faculty navigation data; text/image are the current
+# page's legacy non-PDF content.
+STUDENT_SLIDE_FIELDS = frozenset({"page", "total", "version", "sequence", "pdf", "text", "image"})
+
+
+def _student_slide(metadata):
+    if metadata is None:
+        return None
+    return {key: value for key, value in metadata.items() if key in STUDENT_SLIDE_FIELDS}
 
 
 def _slide_metadata(slide, version=""):
@@ -569,10 +581,13 @@ def _snapshot(db, current, user, faculty, version, cursor=None):
                 for x, y, count, rects in groups if x is not None
             ]
     snapshot = _slide_metadata(slide, version)
+    if not faculty:
+        snapshot = _student_slide(snapshot)
     if faculty and snapshot and snapshot.get("pdf"):
         snapshot["visible_pages"] = visible_pages(db.get(Material, current.material_id))
     transitions = []
-    if cursor and slide and cursor != slide.version:
+    # Past transitions let the presenter's view catch up; students follow the current page only.
+    if faculty and cursor and slide and cursor != slide.version:
         history = db.query(LiveTransition).filter_by(session_id=session_id)
         prior = history.filter_by(version=cursor).first()
         latest = history.filter_by(version=slide.version).first()
@@ -616,12 +631,15 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
               db: Session = Depends(session),
               credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     started = time.perf_counter()
-    _, current, _, slide, material = _live_reader(db, credentials, session_id, include_page=True)
+    _, current, faculty, slide, material = _live_reader(db, credentials, session_id, include_page=True)
     record_phase(request, "auth", started)
     started = time.perf_counter()
     if current.status == "CLOSED" or not slide:
         raise HTTPException(409, "This page is no longer being shared")
     historical = slide.version != version
+    if historical and not faculty:
+        # Students receive the page being shared now; a stale version refetches the latest state.
+        raise HTTPException(409, "This page is no longer being shared")
     if historical:
         slide = db.query(LiveTransition).filter_by(session_id=session_id, version=version).first()
         if not slide:
@@ -630,15 +648,34 @@ def live_page(session_id: str, version: str, request: Request, page: int | None 
     if not content.get("pdf"):
         raise HTTPException(404, "No PDF for this page")
     target = slide.page if page is None else page
-    allowed = (slide.page,) if historical else (slide.page, content.get("before"), content.get("after"))
+    if faculty and not historical:
+        allowed = (slide.page, content.get("before"), content.get("after"))
+    else:
+        allowed = (slide.page,)
     if target not in allowed:
         raise HTTPException(403, "This page is outside the active slide window")
     db.expunge(material)
     db.rollback()
     record_phase(request, "lookup", started)
     started = time.perf_counter()
+    # One cache read decides both the hit and the bytes returned: checking and
+    # then reading again could miss after an eviction and skip the re-check.
+    content = cached_live_page(material, target)
+    if content is not None:
+        record_phase(request, "pdf", started)
+        return _pdf_response(content)
     content = page_pdf(material, target)
     record_phase(request, "pdf", started)
+    if not faculty:
+        # Loading or splitting an uncached page can take long enough for the
+        # presenter to move on or for access to be revoked. Re-check before
+        # returning bytes; the cached path above answers within the same instant.
+        started = time.perf_counter()
+        _, current, _, slide, _ = _live_reader(db, credentials, session_id, include_page=True)
+        db.rollback()
+        if current.status == "CLOSED" or not slide or slide.version != version:
+            raise HTTPException(409, "This page is no longer being shared")
+        record_phase(request, "recheck", started)
     return _pdf_response(content)
 
 
@@ -1048,7 +1085,8 @@ def join(data: JoinRequest, request: Request, response: Response, db: Session = 
     response.headers["Cache-Control"] = "no-store"
     return {"access_token": issue_token(student.id, minutes=STUDENT_TOKEN_MINUTES, session_id=s.id),
             "session": _public_session(db, s),
-            "initial_live": {"status": s.status, "slide": _slide_metadata(db.get(LiveSlide, s.id)), "index": []}}
+            "initial_live": {"status": s.status, "slide": _student_slide(_slide_metadata(db.get(LiveSlide, s.id))),
+                             "index": []}}
 
 
 @router.put("/sessions/{session_id}/live/confusion")
