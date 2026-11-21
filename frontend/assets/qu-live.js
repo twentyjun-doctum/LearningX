@@ -342,8 +342,9 @@
           marker.textContent = '';
           const toggle = el('button', {type: 'button', class: 'live-mark-toggle', text: pin.count,
             'aria-label': '헷갈려요 ' + pin.count + '건', 'aria-expanded': 'false'});
-          const confirm = el('button', {type: 'button', class: 'live-mark-confirm', text: '확인',
-            'aria-label': '이 위치의 헷갈려요 ' + pin.count + '건 확인'});
+          const confirm = el('button', {type: 'button', class: 'live-mark-confirm', text: faculty ? '확인' : '×',
+            'aria-label': faculty ? '이 위치의 헷갈려요 ' + pin.count + '건 확인' : '내 헷갈려요 태그 지우기'});
+          if (faculty) confirm.append(el('span', {class: 'live-mark-spinner', 'aria-hidden': 'true'}));
           toggle.addEventListener('click', () => {
             marker.classList.remove('dismissed');
             const expanded = marker.classList.toggle('expanded');
@@ -364,6 +365,7 @@
           });
           confirm.addEventListener('click', async () => {
             confirm.disabled = true;
+            confirm.setAttribute('aria-busy', 'true');
             try {
               await api(path + '/confusion/acknowledge', {method: 'POST', body: target});
             } catch (error) {
@@ -372,6 +374,7 @@
               }
             } finally {
               confirm.disabled = false;
+              confirm.removeAttribute('aria-busy');
             }
           });
           marker.append(toggle, confirm);
