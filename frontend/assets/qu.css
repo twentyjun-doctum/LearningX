@@ -384,6 +384,8 @@ html.live-view-expanded {overflow:hidden;}
 .obj-card-head{display:flex;flex-direction:column;gap:4px}
 .obj-card-head p{margin:0}
 .obj-title{font-size:16px;font-weight:700;color:var(--ink);margin:0}
+.obj-req,.req-mark{margin-left:3px;color:var(--warn);font-weight:700}
+.objective-legend{margin:6px 0 0;font-size:13px;color:var(--text-muted)}
 .obj-text{width:100%;box-sizing:border-box;font:inherit;font-size:15px;line-height:1.55;color:var(--ink);padding:12px 14px;
   border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--surface);resize:vertical}
 .obj-text::placeholder{color:var(--text-placeholder)}
