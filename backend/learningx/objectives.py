@@ -156,6 +156,19 @@ def public_profile(profile: ObjectiveProfile | None) -> dict | None:
     }
 
 
+def coaching_payload(profile, other_items=None) -> dict:
+    """What coaching receives: validated structured values and approved sentences only."""
+    items = json.loads(profile.other_items) if other_items is None else other_items
+    return {
+        "objective": profile.objective, "process": profile.process, "evidence": profile.evidence,
+        "support": profile.support, "knowledge_type": profile.knowledge_type,
+        "application_context": profile.application_context,
+        "goals": [i["text"] for i in items if i["kind"] == "goal"],
+        "evidences": [i["text"] for i in items if i["kind"] == "evidence"],
+        "guidelines": [i["text"] for i in items if i["kind"] == "guideline"],
+    }
+
+
 def latest_profile(db, material_id) -> ObjectiveProfile | None:
     return (db.query(ObjectiveProfile).filter_by(material_id=material_id)
             .order_by(ObjectiveProfile.version.desc()).first())
@@ -350,3 +363,50 @@ def interpret(material_id: str, data: InterpretIn, db: Session = Depends(session
     owner = db.get(User, db.get(Course, material.course_id).created_by)
     gateway = None if owner is None or is_guest(owner) else nit.model_gateway()
     return interpret_other(data.text.strip(), data.process, data.support, gateway)
+
+
+# ---------- preview with a draft profile (nothing stored) ----------
+
+class PreviewIn(BaseModel):
+    profile: ProfileIn
+    question: str = Field(min_length=10, max_length=2000)
+
+
+@router.post("/materials/{material_id}/objective-profiles/preview")
+def preview(material_id: str, data: PreviewIn, db: Session = Depends(session), user: User = Depends(actor)):
+    """Show the faculty how coaching answers a sample question under a draft profile.
+
+    Uses the same coaching path as a class: signed evidence and the course's
+    coaching consent are required, and a guest class runs without a model.
+    """
+    from types import SimpleNamespace
+    from . import engine_adapter as nit
+    from . import private_store
+    from .classroom import LEVEL_LABEL, LEVEL_MAP
+    from .guest import is_guest
+    from .storage import Course
+
+    material = _material(db, material_id, user)
+    course = db.get(Course, material.course_id)
+    applied, ignored = [], []
+    for item in data.profile.other_items:
+        status, reason = screen_text(item.kind, item.text.strip())
+        (applied if status == "applicable" else ignored).append(
+            {"kind": item.kind, "text": item.text.strip(), **({} if status == "applicable" else {"status": status, "reason": reason})})
+    draft = SimpleNamespace(**data.profile.model_dump(exclude={"other_items", "other_raw"}))
+    objective = coaching_payload(draft, applied)
+    owner = db.get(User, course.created_by)
+    with private_store.material_workspace(material) as out:
+        coaching = nit.coach_question(out, user.id, data.question, course.policy, course.teacher_approved,
+                                      use_model=not (owner and is_guest(owner)), objective=objective)
+    validated = coaching.get("mode") == "MODEL_VALIDATED"
+    level = LEVEL_MAP.get(str(coaching.get("question_level"))) if validated else None
+    return {
+        "mode": coaching.get("mode"), "reason": coaching.get("reason"),
+        "diagnosis": {"question_level": coaching.get("question_level") if validated else None,
+                      "level": level or "unassessed", "level_label": LEVEL_LABEL.get(level, "판정 보류")},
+        "goal_relevance": coaching.get("goal_relevance"),
+        "follow_up_question": coaching.get("follow_up_question"),
+        "evidence_pages": sorted({r.get("page") for r in coaching.get("evidence_refs", []) if isinstance(r, dict)}),
+        "ignored_items": ignored,
+    }

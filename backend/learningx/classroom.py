@@ -34,7 +34,7 @@ from . import private_store
 from .guest import is_guest
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, prepare_shared_page, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
-from .objectives import link_latest_profile
+from .objectives import coaching_payload, link_latest_profile, session_profile
 from .security import actor, decode_token, issue_token, require_course, scheme, session
 from .storage import Audit, Base, Course, Material, Member, Question, Revision, LiveReadSession, PublishSession, SessionLocal, User, publish_engine, uid
 
@@ -234,11 +234,19 @@ def _coach(db, s: ClassSession, user: User, text: str) -> dict:
     c = db.get(Course, s.course_id)
     if not m or not c:
         raise HTTPException(404, "Session material not found")
+    profile = session_profile(db, s.id)
+    objective = coaching_payload(profile) if profile else None
     with private_store.material_workspace(m) as out:
         owner = db.get(User, c.created_by)
+        options = {"objective": objective} if objective else {}
         if owner and is_guest(owner):
-            return nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, use_model=False)
-        return nit.coach_question(out, user.id, text, c.policy, c.teacher_approved)
+            coaching = nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, use_model=False, **options)
+        else:
+            coaching = nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, **options)
+    if profile:
+        # Coaching logs record the profile version so results can be reviewed with the same settings.
+        coaching = {**coaching, "objective_profile": {"id": profile.id, "version": profile.version}}
+    return coaching
 
 
 def _iso(dt):

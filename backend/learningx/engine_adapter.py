@@ -96,13 +96,15 @@ def approve_material(out:Path, reviewer:str, selection:list[dict]):
     try:return approve(out,review,reviewer,signing)
     except (ValueError,PermissionError,KeyError) as exc:raise HTTPException(422,"Evidence approval rejected") from exc
 
-def coach_question(out:Path, student:str, question:str, policy:str, teacher_approved:bool, *, use_model=True):
+def coach_question(out:Path, student:str, question:str, policy:str, teacher_approved:bool, *, use_model=True, objective=None):
     *_,run_coaching,Gateway=_modules()
     signing=os.getenv("NIT_REVIEW_SIGNING_KEY","")
     if len(signing)<32:raise HTTPException(503,"Approval verification key not configured")
     try:
         gateway=Gateway() if use_model else None
-        return run_coaching(out,question,policy,teacher_approved,signing,student,gateway)
+        if objective is None:
+            return run_coaching(out,question,policy,teacher_approved,signing,student,gateway)
+        return run_coaching(out,question,policy,teacher_approved,signing,student,gateway,objective=objective)
     except PermissionError as exc:raise HTTPException(409,"No usable faculty-signed evidence or course policy denies coaching") from exc
     except ValueError as exc:raise HTTPException(422,"Invalid question") from exc
     except Exception as exc:
