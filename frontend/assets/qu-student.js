@@ -31,6 +31,7 @@
   const api = client(() => token, () => {
     token = null;
     stopPoll();
+    clearTimeout(draftPoll);
     showScreen('join');
     setError($('join-error'), '입장 시간이 만료됐습니다. 코드를 다시 입력해 주세요.');
   });
@@ -158,6 +159,188 @@
     scrollThread();
   }
 
+  /* ---------- 교수자에게 보낼 질문 ---------- */
+  const DRAFT_LIMIT = 20;
+  const WARNINGS = {
+    off_topic: '수업 내용과 어떻게 연결되는지 질문에 적어 주세요.',
+    targeted_attack: '사람을 비난하는 표현을 빼고 수업 내용에 초점을 맞춰 주세요.',
+    personal_or_private: '개인 신상이나 사적인 정보를 빼고 질문을 다시 써 주세요.',
+    disruption: '같은 질문을 반복하기보다 아직 이해되지 않는 부분을 구체적으로 적어 주세요.',
+    context_needed: '어떤 개념이나 교안 부분에 관한 질문인지 적어 주세요.',
+    check_unavailable: '질문을 확인하지 못했어요. 확인을 다시 요청해 주세요.',
+  };
+  const drafts = new Map();
+  const selected = new Map();
+  const checking = new Set();
+  let batchSupported = false;
+  let batchSending = false;
+  let pendingBatch = null;
+  let pendingAsk = null;
+  let draftPoll;
+  let draftRead = 0;
+
+  const openForQuestions = () => st.session?.status === 'OPEN';
+  function selectable(draft) {
+    return openForQuestions() && draft.revision_id && draft.suitability?.status === 'eligible';
+  }
+
+  function updateBatchButton() {
+    const button = $('question-batch-send');
+    button.disabled = !openForQuestions() || st.sending || batchSending || !selected.size;
+    button.textContent = batchSending ? '보내는 중…' : `선택한 질문 ${selected.size}개 보내기`;
+    $('question-new').disabled = !openForQuestions() || st.sending || batchSending;
+  }
+
+  function paintDrafts() {
+    $('question-selection').hidden = !batchSupported || !drafts.size;
+    const list = $('question-options');
+    const focused = list.contains(document.activeElement) ? document.activeElement.id : '';
+    const scrollTop = list.scrollTop;
+    const cards = [...drafts.values()].map(draft => {
+      const {id, revision_id, suitability} = draft;
+      const status = suitability?.status;
+      if (!selectable(draft) || selected.get(id) !== revision_id) selected.delete(id);
+      const message = WARNINGS[suitability?.primary_reason] ||
+        (status === 'eligible' ? '보낼 수 있어요' : status === 'needs_revision' ? '질문을 다시 다듬어 주세요.' : '질문 적합성을 확인하는 중이에요.');
+      const checkbox = el('input', {
+        id: 'pick-' + id, type: 'checkbox', checked: selected.has(id),
+        disabled: !selectable(draft) || batchSending,
+        'aria-describedby': 'check-' + id,
+        onchange: event => {
+          if (event.target.checked && selected.size >= DRAFT_LIMIT) {
+            event.target.checked = false;
+            $('question-batch-status').textContent = '한 번에 20개까지 보낼 수 있어요.';
+          } else {
+            if (event.target.checked) selected.set(id, revision_id);
+            else selected.delete(id);
+            $('question-batch-status').textContent = '';
+          }
+          updateBatchButton();
+        },
+      });
+      const pending = status !== 'eligible' && status !== 'needs_revision';
+      return el('div', { class: 'question-option' },
+        el('label', {}, checkbox, el('span', { text: draft.text })),
+        el('p', { id: 'check-' + id, class: status === 'needs_revision' ? 'error' : 'muted', text: message }),
+        el('div', { class: 'row' },
+          el('button', {id: 'edit-' + id, class: 'btn sm', type: 'button', text: '다듬기',
+            disabled: !openForQuestions() || st.sending || batchSending, onclick: () => editDraft(draft)}),
+          pending ? el('button', {id: 'retry-' + id, class: 'btn sm', type: 'button', text: '다시 확인',
+            disabled: !openForQuestions() || !revision_id || checking.has(id) || batchSending, onclick: () => retryDraft(draft)}) : null));
+    });
+    list.replaceChildren(...cards);
+    list.scrollTop = scrollTop;
+    if (focused) $(focused)?.focus({preventScroll: true});
+    updateBatchButton();
+  }
+
+  function editDraft(draft = null) {
+    if (st.sending || batchSending || !openForQuestions()) return;
+    st.current = draft ? {...draft} : null;
+    questionAnchor = null;
+    const input = $('q-input');
+    input.value = draft?.text || '';
+    input.placeholder = '궁금한 점을 질문으로 써 보세요';
+    input.style.height = '';
+    updateComposer();
+    input.focus();
+  }
+
+  function scheduleDraftPoll() {
+    clearTimeout(draftPoll);
+    if (token && openForQuestions() && [...drafts.values()].some(({suitability}) =>
+      suitability?.status === 'pending' && suitability.primary_reason !== 'check_unavailable')) {
+      draftPoll = setTimeout(refreshDrafts, 3000);
+    }
+  }
+
+  async function refreshDrafts() {
+    const access = token;
+    const read = ++draftRead;
+    try {
+      const data = await api(`/v1/sessions/${st.session.id}/mine`);
+      if (token !== access || read !== draftRead || !data.suitability?.policy_version) return;
+      batchSupported = true;
+      const unsent = data.items.filter(draft => !draft.submitted);
+      drafts.clear();
+      for (const draft of unsent) drafts.set(draft.id, draft);
+      for (const id of selected.keys()) if (!drafts.has(id)) selected.delete(id);
+      st.sentCount = data.items.length - unsent.length;
+      updateComposer();
+      paintDrafts();
+    } catch (_) { /* Keep local drafts on a transient read failure. */ }
+    finally { if (token === access && read === draftRead) scheduleDraftPoll(); }
+  }
+
+  async function retryDraft(draft) {
+    const access = token;
+    const {id, revision_id} = draft;
+    checking.add(id);
+    paintDrafts();
+    try {
+      await api(`/v1/session-questions/${id}/suitability/check`, {method: 'POST', body: {revision_id}});
+    } catch (err) {
+      if (token === access) $('question-batch-status').textContent = err.message;
+    } finally {
+      if (token === access) {
+        checking.delete(id);
+        paintDrafts();
+        await refreshDrafts();
+      }
+    }
+  }
+
+  $('question-new').addEventListener('click', () => editDraft());
+  $('question-batch-send').addEventListener('click', async () => {
+    if ($('question-batch-send').disabled) return;
+    const access = token;
+    const items = [...selected].map(([question_id, revision_id]) => ({question_id, revision_id}));
+    if (items.some(({question_id}) => question_id === st.current?.id &&
+      $('q-input').value.trim() && $('q-input').value.trim() !== st.current.text)) {
+      $('question-batch-status').textContent = '수정 중인 질문을 먼저 채팅창에 보내 다시 확인해 주세요.';
+      return;
+    }
+    if (!pendingBatch || JSON.stringify(pendingBatch.items) !== JSON.stringify(items)) {
+      pendingBatch = {request_id: crypto.randomUUID(), items};
+    }
+    batchSending = true;
+    draftRead++;
+    clearTimeout(draftPoll);
+    updateComposer();
+    paintDrafts();
+    try {
+      const data = await api(`/v1/sessions/${st.session.id}/questions/submit-batch`, {method: 'POST', body: pendingBatch});
+      if (token !== access) return;
+      draftRead++;
+      $('question-batch-status').textContent = '';
+      pendingBatch = null;
+      for (const item of data.submitted) {
+        selected.delete(item.question_id);
+        drafts.delete(item.question_id);
+        if (st.current?.id === item.question_id) st.current = null;
+      }
+      st.sentCount += data.submitted.length;
+      coachMsg(el('span', {text: `선택한 질문 ${data.submitted.length}개를 교수자에게 보냈어요.`}));
+    } catch (err) {
+      if (token !== access) return;
+      if (err.status === 409) {
+        pendingBatch = null;
+        selected.clear();
+        await refreshDrafts();
+      }
+      if (err.status === 423) await pollStatus();
+      $('question-batch-status').textContent = err.status === 409
+        ? '질문 상태가 바뀌었어요. 다시 확인하고 선택해 주세요.' : err.message;
+    } finally {
+      if (token === access) {
+        batchSending = false;
+        updateComposer();
+        paintDrafts();
+        scheduleDraftPoll();
+      }
+    }
+  });
+
   /* ---------- 입장 ---------- */
   $('code').addEventListener('input', (e) => {
     e.target.value = e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
@@ -193,7 +376,15 @@
   function startCoach(initial) {
     showScreen('coach');
     $('course-title').textContent = st.session.course_title || '오늘 수업';
+    batchSupported = batchSending = st.sending = false;
+    pendingBatch = pendingAsk = null;
+    drafts.clear();
+    selected.clear();
+    checking.clear();
+    $('question-batch-status').textContent = '';
+    paintDrafts();
     resetThread();
+    refreshDrafts();
     applyStatus(st.session.status);
     stopPoll();
     liveView = window.QU.createLiveView({
@@ -250,10 +441,11 @@
     const v = $('q-input').value.trim();
     const open = st.session && st.session.status === 'OPEN';
     const hasBlank = BLANK.test(v);
-    $('send').disabled = !open || st.sending || v.length < 5 || hasBlank;
+    $('send').disabled = !open || st.sending || batchSending || v.length < 5 || hasBlank;
     $('hint').textContent = hasBlank ? '빈칸(___)이 아직 남아 있어요. 내 생각으로 채워 주세요'
       : st.current ? '고친 질문을 보내면 다시 코칭해 드려요' : '다른 학생에게는 내 이름이 보이지 않아요';
-    $('send-now').hidden = !st.current || !open;
+    $('send-now').hidden = !st.current || !open || batchSupported;
+    updateBatchButton();
     $('to-mine').hidden = st.sentCount === 0;
   }
   function blockQuestionPaste(event) {
@@ -279,29 +471,48 @@
     e.preventDefault();
     const text = $('q-input').value.trim();
     if ($('send').disabled) return;
-    st.sending = true; updateComposer();
+    const access = token;
+    st.sending = true; updateComposer(); paintDrafts();
     meMsg(text);
     $('q-input').value = ''; $('q-input').style.height = '';
     const typing = el('p', { class: 'typing', text: '질문을 살펴보는 중…' });
     $('thread').append(typing); scrollThread();
     try {
+      const body = {question: text, slide_page: questionAnchor?.page ?? liveView?.page(), anchor: questionAnchor?.anchor};
+      if (!st.current && (!pendingAsk || pendingAsk.content !== JSON.stringify(body))) {
+        pendingAsk = {content: JSON.stringify(body), requestId: crypto.randomUUID()};
+      }
       const res = st.current
         ? await api(`/v1/session-questions/${st.current.id}/revisions`, { method: 'POST', body: { text }, timeout: 90000 })
-        : await api(`/v1/sessions/${st.session.id}/questions`, { method: 'POST', body: { question: text, slide_page: questionAnchor?.page ?? liveView?.page(), anchor: questionAnchor?.anchor }, timeout: 90000 });
+        : await api(`/v1/sessions/${st.session.id}/questions`, { method: 'POST',
+          body: {...body, request_id: pendingAsk.requestId}, timeout: 90000 });
       typing.remove();
+      if (token !== access) return;
+      pendingAsk = null;
       if (!st.current) st.current = { id: res.id, original: text };
       st.current.level = res.level;
       st.current.text = text;
+      if (res.revision_id) {
+        draftRead++;
+        batchSupported = true;
+        const draft = {...st.current, revision_id: res.revision_id, suitability: res.suitability};
+        drafts.set(draft.id, draft);
+        $('question-batch-status').textContent = '';
+        const warning = WARNINGS[draft.suitability?.primary_reason];
+        if (warning) coachMsg(el('span', {class: 'error', text: warning}));
+        scheduleDraftPoll();
+      }
       renderCoaching(res.level, res.coaching);
     } catch (err) {
       typing.remove();
+      if (token !== access) return;
       if (err.status === 423) { await pollStatus(); }
       coachMsg(el('span', { text: err.status === 423 ? '지금은 질문을 받지 않는 중이에요. 교수자가 다시 열면 이어서 보낼 수 있어요.'
         : err.status === 409 ? '이미 교수자에게 보낸 질문이에요. 새 질문을 써 주세요.' : `${err.message} 다시 보내 볼까요?` }));
       if (err.status === 409) st.current = null;
       if (err.status !== 409) $('q-input').value = text;
     } finally {
-      st.sending = false; updateComposer();
+      if (token === access) { st.sending = false; updateComposer(); paintDrafts(); }
     }
   });
 
@@ -332,7 +543,7 @@
     const pages = c && c.evidence_refs ? [...new Set(c.evidence_refs.map((r) => r.page).filter(Boolean))] : [];
     if (pages.length) parts.push(el('div', { class: 'row' }, ...pages.slice(0, 4).map((p) => el('span', { class: 'evidence', text: `근거 · 교안 p.${p}` }))));
 
-    if (level === 'deep') {
+    if (level === 'deep' && !batchSupported) {
       parts.push(el('b', { text: '이 질문을 교수자에게 보낼까요?' }));
       parts.push(el('div', { class: 'row' },
         el('button', { class: 'btn primary', type: 'button', text: '교수자에게 보내기', onclick: submitCurrent }),
@@ -364,7 +575,7 @@
   $('send-now').addEventListener('click', submitCurrent);
 
   async function submitCurrent() {
-    if (!st.current) return;
+    if (!st.current || batchSupported) return;
     try {
       const res = await api(`/v1/session-questions/${st.current.id}/submit`, { method: 'POST' });
       st.sentCount += 1;
@@ -433,6 +644,8 @@
     banner.textContent = status === 'PAUSED' ? '교수자가 잠시 질문 받기를 멈췄어요. 다시 열리면 보낼 수 있어요.'
       : status === 'CLOSED' ? '수업이 끝났어요. 보낸 질문은 “내 질문”에서 볼 수 있어요.' : '';
     updateComposer();
+    paintDrafts();
+    scheduleDraftPoll();
     if (status === 'CLOSED') {
       stopPoll();
       if (!$('screen-coach').hidden || !$('screen-sent').hidden) showMine();

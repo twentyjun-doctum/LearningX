@@ -95,7 +95,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  const messages = [];
  const el = (tag, attrs = {}, ...kids) => ({tag, attrs, kids, append(...more){ kids.push(...more); }});
  const student = vm.createContext({el, levelText, LEVEL: ctx.window.QU.LEVEL, plant: stage => ({plant: stage}),
-  RANK: {seed: 0, shallow: 1, mid: 2, deep: 3}, GROWTH: {}, TEMPLATES: {}, st: {stage: 'mid'},
+  batchSupported: false, RANK: {seed: 0, shallow: 1, mid: 2, deep: 3}, GROWTH: {}, TEMPLATES: {}, st: {stage: 'mid'},
   setStage: stage => stages.push(stage), coachMsg: (...parts) => messages.push(parts),
   $: () => ({append(){}}), scrollThread(){}, submitCurrent(){}, updateComposer(){}, useTemplate(){},
   document: {createTextNode: text => ({text})}});
@@ -595,4 +595,47 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  ]);
  console.log('OK: question projection renders immediately and persists the latest selection in order',
   {firstUpdateMs: firstPaintMs.toFixed(2), nextUpdateMs: nextPaintMs.toFixed(2)});
+}
+
+{
+ const start = quStudent.indexOf('  const DRAFT_LIMIT =');
+ const end = quStudent.indexOf('  /* ---------- 입장', start);
+ const elements = new Map();
+ const el = (tag, attrs = {}, ...kids) => ({
+  tag, attrs, kids, disabled: !!attrs.disabled, contains: () => false,
+  replaceChildren(...children) { this.kids = children; },
+  addEventListener(name, handler) { this[name] = handler; },
+ });
+ const $ = id => {
+  if (!elements.has(id)) elements.set(id, el('div'));
+  return elements.get(id);
+ };
+ const requests = [];
+ const ctx = vm.createContext({$, el, token: 'test', document: {}, clearTimeout(){}, setTimeout(){},
+  st: {session: {id:'class', status:'OPEN'}, sentCount:0}, crypto: {randomUUID: () => 'batch-id'},
+  updateComposer(){}, coachMsg(){},
+  api: async (path, options) => {
+   requests.push({path, ...options});
+   if (requests.length === 1) throw new Error('network error');
+   return {submitted: options.body.items};
+  },
+ });
+ vm.runInContext(quStudent.slice(start, end) + `
+   batchSupported = true;
+   for (const [id, status] of [['a','eligible'],['b','eligible'],['c','needs_revision'],['d','pending']]) {
+    drafts.set(id, {id, text: id, revision_id: 'rev-' + id, suitability: {status, primary_reason: 'off_topic'}});
+   }
+   paintDrafts();`, ctx);
+ const boxes = () => $('question-options').kids.map(card => card.kids[0].kids[0]);
+ assert.deepEqual(Array.from(boxes(), box => box.disabled), [false, false, true, true]);
+ for (const box of boxes().slice(0,2)) box.attrs.onchange({target:{checked:true}});
+ assert.match($('question-batch-send').textContent, /2개/);
+ await $('question-batch-send').click();
+ await $('question-batch-send').click();
+ assert.equal(requests[0].path, '/v1/sessions/class/questions/submit-batch');
+ assert.equal(JSON.stringify(requests[0].body), JSON.stringify(requests[1].body));
+ assert.deepEqual(Array.from(requests[1].body.items, item => item.revision_id), ['rev-a','rev-b']);
+ assert.deepEqual(Array.from(boxes(), box => box.attrs.id), ['pick-c','pick-d']);
+ assert.equal(ctx.st.sentCount, 2);
+ console.log('OK: eligible drafts submit together, blocked drafts stay disabled, and network retries retain the batch ID');
 }
