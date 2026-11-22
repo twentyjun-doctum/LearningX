@@ -106,6 +106,25 @@ class UnassessedLevelTests(unittest.TestCase):
                     self.assertEqual(json.loads(row.latest_coaching_json)["reason"], reason,
                                      "the failure reason is kept apart from the judgment")
 
+    def test_a_class_without_a_configured_model_still_coaches(self):
+        """A faculty (non-guest) class on a server with no model gets the deterministic coaching, not a 503."""
+        student = self.req("POST", "/v1/join", json={"code": self.code}).json()["access_token"]
+        calls = []
+        def coach(out, sid, text, policy, approved, *, use_model=True, objective=None):
+            calls.append(use_model)
+            return fallback("guest_model_disabled") if not use_model else validated("analyze")
+        with patch.object(nit, "model_gateway", return_value=None), patch.object(nit, "coach_question", side_effect=coach):
+            asked = self.req("POST", f"/v1/sessions/{self.session_id}/questions", student,
+                             json={"question": "이 실험에서 두 집단의 차이는 무엇인가요?"})
+        self.assertEqual(asked.status_code, 201, asked.text)
+        self.assertEqual(calls, [False], "no model call is attempted without a configured model")
+        self.assertEqual(asked.json()["level"], "unassessed")
+        with patch.object(nit, "model_gateway", return_value=object()), patch.object(nit, "coach_question", side_effect=coach):
+            with_model = self.req("POST", f"/v1/sessions/{self.session_id}/questions", student,
+                                  json={"question": "두 집단의 평균 차이는 어떤 근거로 설명하나요?"})
+        self.assertEqual(with_model.status_code, 201, with_model.text)
+        self.assertTrue(calls[-1], "a configured model is still used")
+
     def test_validated_levels_are_unchanged(self):
         for model_level, level in [("clarify", "shallow"), ("apply", "mid"), ("analyze", "mid"),
                                    ("evaluate", "deep"), ("create", "deep")]:

@@ -289,10 +289,10 @@ def _coach(db, s: ClassSession, user: User, text: str) -> dict:
     with private_store.material_workspace(m) as out:
         owner = db.get(User, c.created_by)
         options = {"objective": objective} if objective else {}
-        if owner and is_guest(owner):
-            coaching = nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, use_model=False, **options)
-        else:
-            coaching = nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, **options)
+        # Guest classes and deployments without a configured model use the deterministic coaching
+        # (recorded as unassessed) instead of failing the student's question with a 503.
+        use_model = not (owner and is_guest(owner)) and nit.model_gateway() is not None
+        coaching = nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, use_model=use_model, **options)
     if profile:
         # Coaching logs record the profile version so results can be reviewed with the same settings.
         coaching = {**coaching, "objective_profile": {"id": profile.id, "version": profile.version}}
