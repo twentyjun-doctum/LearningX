@@ -45,7 +45,7 @@
   function route(result) {
     if (!result) return;
     if (result.needsRole) {
-      $('google-role-email').textContent = `${result.email} 계정으로 처음 로그인했어요.`;
+      $('google-role-email').textContent = google.roleIntro(result);
       show($('google-role'), true);
       show(button, false);
       show($('google-note'), false);
@@ -53,7 +53,7 @@
       return;
     }
     // The role page signs in again from the same Neon session and keeps its token in memory.
-    google.goTo(result.role === 'faculty' ? 'teacher.html' : 'student.html');
+    google.goTo(result.role === 'faculty' ? 'teacher.html' : 'student.html', result.role);
   }
 
   async function run(task, label) {

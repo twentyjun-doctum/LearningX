@@ -41,14 +41,21 @@
       return neonToken ? { email } : null;
     }
 
-    // Returns {role, access_token | join_ticket} or {needsRole: true, email}; throws Error with a message.
+    // The role chosen on the previous page, carried in the redirect (masters choose on every sign-in).
+    function roleHint() {
+      const as = returning() ? new URLSearchParams(location.search).get('as') : null;
+      return as === 'student' || as === 'faculty' ? as : null;
+    }
+
+    // Returns {role, access_token | join_ticket} or {needsRole: true, email, master}; throws Error with a message.
     async function exchange(role) {
       if (!neonToken && !(await session())) return null;
+      const chosen = role || roleHint();
       try {
-        return await api('/v1/auth/neon/session', { method: 'POST', body: { token: neonToken, ...(role ? { role } : {}) } });
+        return await api('/v1/auth/neon/session', { method: 'POST', body: { token: neonToken, ...(chosen ? { role: chosen } : {}) } });
       } catch (err) {
         const detail = err.detail && typeof err.detail === 'object' ? err.detail : {};
-        if (detail.code === 'role_required') return { needsRole: true, email: detail.email || email };
+        if (detail.code === 'role_required') return { needsRole: true, email: detail.email || email, master: !!detail.master };
         if (MESSAGES[detail.code]) {
           // Let the person pick another Google account next time.
           if (detail.code === 'domain_not_allowed' || detail.code === 'email_unverified') await signOut();
@@ -69,20 +76,25 @@
     }
 
     // Move to the page for a role, keeping a local ?api= override; the Neon session carries over.
-    function goTo(page) {
+    function goTo(page, role) {
       const q = new URLSearchParams(location.search);
-      const next = new URLSearchParams({ google: '1' });
+      const next = new URLSearchParams({ google: '1', ...(role ? { as: role } : {}) });
       if (q.get('api')) next.set('api', q.get('api'));
       location.href = `${page}?${next}`;
     }
 
     function clearReturnParams() {
       const url = new URL(location.href);
-      ['google', 'neon_auth_session_verifier'].forEach((k) => url.searchParams.delete(k));
+      ['google', 'as', 'neon_auth_session_verifier'].forEach((k) => url.searchParams.delete(k));
       history.replaceState(history.state, '', url.href);
     }
 
-    return { returning, session, exchange, start, signOut, goTo, clearReturnParams, email: () => email };
+    // What the role step says about the account.
+    const roleIntro = (result) => (result.master
+      ? `${result.email} · 마스터 계정이라 로그인할 때마다 역할을 골라요.`
+      : `${result.email} 계정으로 처음 로그인했어요.`);
+
+    return { returning, session, exchange, start, signOut, goTo, clearReturnParams, roleIntro, email: () => email };
   }
 
   window.QU = Object.assign(window.QU || {}, { createGoogleLogin });

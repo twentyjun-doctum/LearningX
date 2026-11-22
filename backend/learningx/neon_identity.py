@@ -11,8 +11,13 @@ Who gets in: a Google-verified email on an allowed school domain
 the choice is stored and later sign-ins are classified from the database. An
 existing account with the same verified email keeps its stored role. Accounts
 are linked by the Neon user id (``sub``) after that, never by email again.
+
+Master accounts (operators' test accounts) choose a role on every sign-in: the
+choice and the Google link are not stored, and each role works on its own
+account so classes and questions made while testing are kept per role.
 """
 import base64
+import hashlib
 import os
 import threading
 import time
@@ -37,6 +42,14 @@ DEFAULT_AUTH_URL = "https://ep-empty-breeze-b3t239qi.neonauth.c-4.ap-southeast-1
 JWKS_TTL_SECONDS = 600
 DEFAULT_ALLOWED_DOMAINS = "hanyang.ac.kr"
 STUDENT_TICKET_MINUTES = 30
+# SHA-256 of the master accounts' lowercase emails (kept out of the repository in plain text).
+# NIT_MASTER_EMAILS (comma-separated plain emails) adds more without a code change.
+MASTER_EMAIL_SHA256 = frozenset({
+    "a2cf003557a3b4ea1886f06589985e4dc3a0baddeff2bb17115c526e74c92ee0",
+    "4f438efc48fdc181c4500dfbf8621571e4202cc6baf02ffa4801fef9fd103ec4",
+    "b36ae8e0cf2169cf3e15bfa9f66811b8f3e064eb918f54345de06e2f9f1f6839",
+    "3ac1cf5b4d68ef05a809c7a1816b0ebd2e1e190640c9c223b7e0021ec2347376",
+})
 
 router = APIRouter(prefix="/v1")
 
@@ -58,6 +71,32 @@ def allowed_domains() -> list[str]:
 def domain_allowed(email: str) -> bool:
     domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
     return bool(domain) and any(domain == d or domain.endswith("." + d) for d in allowed_domains())
+
+
+def is_master(email: str) -> bool:
+    extra = {e.strip().lower() for e in os.getenv("NIT_MASTER_EMAILS", "").split(",") if e.strip()}
+    return email in extra or hashlib.sha256(email.encode()).hexdigest() in MASTER_EMAIL_SHA256
+
+
+def _master_user(db, email: str, role: str) -> User:
+    """The working account of a master for one role (created on first use, then reused)."""
+    plain = db.query(User).filter(User.email == email).first()
+    if plain is not None and plain.role == role and plain.active:
+        return plain  # keeps anything made before the account became a master
+    local, domain = email.split("@", 1)
+    alias = f"{local}+{role}@{domain}"
+    user = db.query(User).filter(User.email == alias).first()
+    if user is None:
+        user = User(email=alias, role=role, active=True)
+        db.add(user)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            user = db.query(User).filter(User.email == alias).one()
+    if not user.active or user.role != role:
+        raise HTTPException(403, {"code": "account_inactive"})
+    return user
 
 
 class GoogleIdentity(Base):
@@ -140,10 +179,11 @@ def student_ticket(user_id: str) -> str:
                       secret(), algorithm="HS256")
 
 
-def _granted(user: User) -> dict:
+def _granted(user: User, master: bool = False) -> dict:
+    extra = {"master": True} if master else {}
     if user.role == "faculty":
-        return {"role": "faculty", "access_token": issue_token(user.id, minutes=60), "expires_in": 3600}
-    return {"role": "student", "join_ticket": student_ticket(user.id), "expires_in": STUDENT_TICKET_MINUTES * 60}
+        return {"role": "faculty", "access_token": issue_token(user.id, minutes=60), "expires_in": 3600, **extra}
+    return {"role": "student", "join_ticket": student_ticket(user.id), "expires_in": STUDENT_TICKET_MINUTES * 60, **extra}
 
 
 @router.post("/auth/neon/session")
@@ -155,6 +195,11 @@ def neon_session(data: NeonSessionIn, response: Response, db: Session = Depends(
         raise HTTPException(403, {"code": "email_unverified"})
     if not domain_allowed(email):
         raise HTTPException(403, {"code": "domain_not_allowed", "domains": allowed_domains()})
+    if is_master(email):
+        # Master: a role on every sign-in; neither the choice nor the Google link is stored.
+        if data.role is None:
+            raise HTTPException(403, {"code": "role_required", "email": email, "master": True})
+        return _granted(_master_user(db, email, data.role), master=True)
     identity = db.get(GoogleIdentity, claims["sub"])
     if identity is None:
         user = db.query(User).filter(User.email == email).first()

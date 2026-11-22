@@ -169,6 +169,33 @@ class NeonIdentityTests(unittest.TestCase):
         with patch.object(ni, "_fetch_jwks", down):
             self.assertEqual(self.exchange(self.token(), role="faculty").status_code, 503)
 
+    def test_master_accounts_choose_a_role_every_time_and_store_nothing(self):
+        email = f"master-{uid()[:6]}@hanyang.ac.kr"
+        sub = "neon-" + uid()
+        with patch.dict(os.environ, {"NIT_MASTER_EMAILS": email}):
+            first = self.exchange(self.token(sub, email=email))
+            self.assertEqual(first.json()["detail"], {"code": "role_required", "email": email, "master": True})
+            fac = self.exchange(self.token(sub, email=email), role="faculty").json()
+            self.assertEqual((fac["role"], fac["master"]), ("faculty", True))
+            again = self.exchange(self.token(sub, email=email))
+            self.assertEqual(again.json()["detail"]["code"], "role_required", "the role is asked again on every sign-in")
+            stu = self.exchange(self.token(sub, email=email), role="student").json()
+            self.assertEqual(stu["role"], "student", "the same master can test the student side next")
+            fac2 = self.exchange(self.token(sub, email=email), role="faculty").json()
+            self.assertEqual(decode_token(Creds(fac["access_token"]))["sub"], decode_token(Creds(fac2["access_token"]))["sub"],
+                             "classes made as faculty are kept for the next faculty sign-in")
+        with SessionLocal() as db:
+            self.assertIsNone(db.get(ni.GoogleIdentity, sub), "no Google link is stored for a master")
+            self.assertIsNone(db.query(User).filter_by(email=email).first(), "no account is stored under the plain email")
+            roles = {u.email: u.role for u in db.query(User).filter(User.email.like(email.split("@")[0] + "+%"))}
+            self.assertEqual(roles, {email.replace("@", "+faculty@"): "faculty", email.replace("@", "+student@"): "student"})
+
+    def test_built_in_master_list_matches_by_hash(self):
+        self.assertTrue(ni.is_master("zxmk9123@hanyang.ac.kr"))
+        self.assertFalse(ni.is_master("someone@hanyang.ac.kr"))
+        import inspect
+        self.assertNotIn("zxmk9123", inspect.getsource(ni), "emails are not stored in plain text")
+
     def test_a_google_student_joins_classes_as_the_same_account(self):
         folder = Path(TEMP.name) / ("lesson-" + uid())
         folder.mkdir(parents=True)

@@ -131,13 +131,13 @@
   async function finishGoogle(result) {
     if (!result) return false;
     if (result.needsRole) {
-      $('google-role-email').textContent = `${result.email} 계정으로 처음 로그인했어요.`;
+      $('google-role-email').textContent = google.roleIntro(result);
       show($('google-role'), true);
       $('google-role').querySelector('.role-card').focus();
       return false;
     }
     show($('google-role'), false);
-    if (result.role === 'student') { google.goTo('student.html'); return false; }
+    if (result.role === 'student') { google.goTo('student.html', 'student'); return false; }
     token = result.access_token;
     google.clearReturnParams();
     return true;
