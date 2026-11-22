@@ -155,6 +155,10 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.ok(quTeacher.includes("google.goTo('student.html', 'student')") && quStudentSrc.includes("google.goTo('teacher.html', 'faculty')"), 'each role is sent to its page with the chosen role');
  assert.ok(quGoogle.includes('roleHint()') && quGoogle.includes('detail.master'), 'masters choose a role on every sign-in without a second prompt');
  assert.ok(quStudentSrc.includes('client(() => joinTicket)'), 'a Google student joins with the join ticket');
+ // Faculty board: a Google student's name is masked until clicked; the projector never shows it.
+ assert.ok(quTeacher.includes('function studentChip(q)') && quTeacher.includes('revealedNames'), 'masked name chip with a remembered reveal');
+ assert.ok(!/proj-[a-z]+'\)\.textContent = [^;]*student/.test(quTeacher), 'the projector never renders a student name');
+ assert.ok(studentHtml.includes('id="google-privacy"'), 'students are told their name reaches the faculty');
  const ctx = vm.createContext({window:{QU:{el(){}}}});
  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
  const R = ctx.window.QU.objectiveRules;

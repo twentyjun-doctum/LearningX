@@ -99,6 +99,35 @@ def _master_user(db, email: str, role: str) -> User:
     return user
 
 
+class UserProfile(Base):
+    """Display name from the school Google account (new table only). Shown to the class's
+    faculty on submitted questions, masked until clicked; never on the projector or CSV."""
+    __tablename__ = "user_profiles"
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False,
+                                                 default=lambda: datetime.now(timezone.utc))
+
+
+def remember_name(db, user: User, claims: dict) -> None:
+    """Keep the Google display name current (it may change in the Google account)."""
+    name = " ".join(str(claims.get("name") or "").split())[:80]
+    if not name:
+        return
+    profile = db.get(UserProfile, user.id)
+    if profile is None:
+        db.add(UserProfile(user_id=user.id, display_name=name))
+    elif profile.display_name != name:
+        profile.display_name = name
+        profile.updated_at = datetime.now(timezone.utc)
+    else:
+        return
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+
+
 class GoogleIdentity(Base):
     """A Neon Auth (Google) user linked to one LearningX account (new table only)."""
     __tablename__ = "google_identities"
@@ -199,7 +228,9 @@ def neon_session(data: NeonSessionIn, response: Response, db: Session = Depends(
         # Master: a role on every sign-in; neither the choice nor the Google link is stored.
         if data.role is None:
             raise HTTPException(403, {"code": "role_required", "email": email, "master": True})
-        return _granted(_master_user(db, email, data.role), master=True)
+        user = _master_user(db, email, data.role)
+        remember_name(db, user, claims)
+        return _granted(user, master=True)
     identity = db.get(GoogleIdentity, claims["sub"])
     if identity is None:
         user = db.query(User).filter(User.email == email).first()
@@ -226,4 +257,5 @@ def neon_session(data: NeonSessionIn, response: Response, db: Session = Depends(
     user = db.get(User, identity.user_id)
     if not user or not user.active or user.role not in ("student", "faculty"):
         raise HTTPException(403, {"code": "account_inactive"})
+    remember_name(db, user, claims)
     return _granted(user)

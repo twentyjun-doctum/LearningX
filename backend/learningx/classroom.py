@@ -1039,8 +1039,29 @@ def board(session_id: str, level: Literal["all", "shallow", "mid", "deep", "unas
         if level == "all" or r.level == level:
             selected.append(r)
     originals = _original_texts(db, selected)
-    items = [_board_item(db, r, originals) for r in selected]
+    students = _google_students(db, selected)
+    # Only this faculty board carries who asked; the projector and CSV use _board_item alone.
+    items = [{**_board_item(db, r, originals),
+              **({"student": students[r.student_id]} if r.student_id in students else {})} for r in selected]
     return {"session": _public_session(db, s, faculty=True), "counts": counts, "items": items}
+
+
+def _google_students(db, rows) -> dict:
+    """Name and school email of students who joined with Google, in one query.
+    Anonymous joins (and anything else without a school account) stay anonymous."""
+    from .neon_identity import UserProfile
+    ids = {r.student_id for r in rows}
+    if not ids:
+        return {}
+    found = (db.query(User.id, User.email, UserProfile.display_name)
+             .outerjoin(UserProfile, UserProfile.user_id == User.id)
+             .filter(User.id.in_(ids), User.role == "student", ~User.email.like("%@join.question-up.local")).all())
+    out = {}
+    for uid_, email, name in found:
+        local, _, domain = email.partition("@")
+        shown_email = local.split("+", 1)[0] + "@" + domain  # a master's working account shows its school email
+        out[uid_] = {"name": name or local.split("+", 1)[0], "email": shown_email}
+    return out
 
 
 def _faculty_row(db, row_id, user):

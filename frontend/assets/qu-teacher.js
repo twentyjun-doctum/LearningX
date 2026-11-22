@@ -806,6 +806,28 @@
     }));
   }
 
+  // Names of Google students are masked until the faculty clicks; the choice survives board refreshes.
+  const revealedNames = new Set();
+  function studentChip(q) {
+    if (!q.student) return null;
+    const { name, email } = q.student;
+    const label = (shown) => (shown ? `${name} 학생, ${email}. 눌러서 다시 가리기` : '가려진 학생 이름. 눌러서 보기');
+    const shown = revealedNames.has(q.id);
+    const nameNode = el('span', { class: 'who-name', text: name, 'aria-hidden': shown ? null : 'true' });
+    const chip = el('button', { class: 'who' + (shown ? ' is-shown' : ''), type: 'button', 'aria-pressed': String(shown),
+      'aria-label': label(shown), title: shown ? email : '눌러서 학생 이름 보기' }, nameNode);
+    chip.addEventListener('click', () => {
+      const now = !revealedNames.has(q.id);
+      if (now) revealedNames.add(q.id); else revealedNames.delete(q.id);
+      chip.classList.toggle('is-shown', now);
+      chip.setAttribute('aria-pressed', String(now));
+      chip.setAttribute('aria-label', label(now));
+      chip.title = now ? email : '눌러서 학생 이름 보기';
+      if (now) nameNode.removeAttribute('aria-hidden'); else nameNode.setAttribute('aria-hidden', 'true');
+    });
+    return chip;
+  }
+
   function questionCard(q, isNew) {
     const cls = ['qcard', q.projected ? 'projected' : '', isNew ? 'is-new' : '', q.hidden ? 'is-hidden' : ''].filter(Boolean).join(' ');
     return el('article', { class: cls, id: 'indexed-' + q.id },
@@ -815,6 +837,7 @@
         q.original ? el('p', { class: 'orig', text: `처음 질문: ${q.original}` }) : null,
         el('div', { class: 'meta' },
           el('span', { class: `lv ${q.level}`, text: levelText(q.level) }),
+          studentChip(q),
           q.original ? el('span', { text: '다시 씀' }) : null,
           el('span', { text: relTime(q.submitted_at) }),
           q.hidden ? el('span', { text: '숨김' }) : null,

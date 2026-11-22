@@ -402,9 +402,10 @@
     const signedIn = !!joinTicket;
     show($('google-start'), !signedIn);
     show($('google-divider'), !signedIn);
+    show($('google-privacy'), !signedIn);
     show($('google-cancel'), signedIn || !$('google-role').hidden);
     $('join-mode').textContent = signedIn
-      ? `학교 계정(${google.email()})으로 참여해요. 다른 학생과 교수자 화면에는 이름이 보이지 않아요.`
+      ? `학교 계정(${google.email()})으로 참여해요. 질문을 보내면 이름과 학교 이메일이 교수자에게 함께 전달돼요(다른 학생에게는 보이지 않아요).`
       : '로그인 없이 익명으로 참여합니다. 다른 학생에게는 내 이름이 보이지 않아요.';
   }
 

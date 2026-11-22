@@ -227,5 +227,57 @@ class NeonIdentityTests(unittest.TestCase):
         self.assertEqual(wrong.status_code, 403, "only a student ticket joins as an account")
 
 
+class FacultySeesGoogleStudentNames(NeonIdentityTests):
+    """Submitted questions from Google students carry name and school email to the class's
+    faculty board only; anonymous students, the projector and the CSV stay anonymous."""
+
+    def test_board_shows_who_asked_only_for_google_students(self):
+        folder = Path(TEMP.name) / ("lesson-" + uid())
+        folder.mkdir(parents=True)
+        (folder / "document.json").write_text(json.dumps({"pages": [{"page": 1, "blocks": []}]}))
+        faculty = self.exchange(self.token(), role="faculty").json()["access_token"]
+        fh = {"Authorization": "Bearer " + faculty}
+        with SessionLocal() as db:
+            fid = decode_token(Creds(faculty))["sub"]
+            course = Course(title="설득", policy="PERMITTED", teacher_approved=True, created_by=fid)
+            db.add(course)
+            db.flush()
+            db.add(Member(course_id=course.id, user_id=fid, role="faculty"))
+            material = Material(course_id=course.id, filename="l.pdf", sha256="d" * 64, out_dir=str(folder), ingested_by=fid)
+            db.add(material)
+            db.commit()
+            course_id, material_id = course.id, material.id
+        with patch.object(nit, "verified_count", return_value=1):
+            opened = self.client.post(f"/v1/courses/{course_id}/sessions", json={"material_id": material_id}, headers=fh).json()
+        email, sub = f"kim-{uid()[:6]}@hanyang.ac.kr", "neon-" + uid()
+        ticket = self.exchange(self.token(sub, email=email, name="  김  하늘 "), role="student").json()["join_ticket"]
+        google = self.client.post("/v1/join", json={"code": opened["join_code"]}, headers={"Authorization": "Bearer " + ticket}).json()["access_token"]
+        anon = self.client.post("/v1/join", json={"code": opened["join_code"]}).json()["access_token"]
+        coaching = {"mode": "DETERMINISTIC_FALLBACK", "question_level": "analyze", "follow_up_question": "근거는?",
+                    "evidence_refs": [], "feedback": "구체화해 보세요.", "reason": "guest_model_disabled"}
+        ids = {}
+        with patch.object(nit, "coach_question", return_value=coaching), patch.object(nit, "model_gateway", return_value=None):
+            for who, tok, text in (("google", google, "광고 모델의 신뢰성은 왜 중요한가요?"), ("anon", anon, "공포 소구는 언제 효과적인가요?")):
+                q = self.client.post(f"/v1/sessions/{opened['id']}/questions", json={"question": text},
+                                     headers={"Authorization": "Bearer " + tok}).json()
+                self.assertEqual(self.client.post(f"/v1/session-questions/{q['id']}/submit",
+                                                  headers={"Authorization": "Bearer " + tok}).status_code, 200)
+                ids[who] = q["id"]
+        board = {i["id"]: i for i in self.client.get(f"/v1/sessions/{opened['id']}/board", headers=fh).json()["items"]}
+        self.assertEqual(board[ids["google"]]["student"], {"name": "김 하늘", "email": email})
+        self.assertNotIn("student", board[ids["anon"]], "anonymous joins stay anonymous")
+        shown = self.client.post(f"/v1/session-questions/{ids['google']}/project", headers=fh).json()
+        self.assertNotIn("student", shown["projected"], "never on the projector")
+        projected = self.client.get(f"/v1/sessions/{opened['id']}/projected", headers=fh).json()
+        self.assertNotIn("김 하늘", json.dumps(projected, ensure_ascii=False))
+        csv_text = self.client.get(f"/v1/sessions/{opened['id']}/export", headers=fh).text
+        self.assertNotIn("김 하늘", csv_text)
+        self.assertNotIn(email, csv_text)
+        # The name follows the Google account when it changes.
+        self.exchange(self.token(sub, email=email, name="김하늘"))
+        board = {i["id"]: i for i in self.client.get(f"/v1/sessions/{opened['id']}/board", headers=fh).json()["items"]}
+        self.assertEqual(board[ids["google"]]["student"]["name"], "김하늘")
+
+
 if __name__ == "__main__":
     unittest.main()
