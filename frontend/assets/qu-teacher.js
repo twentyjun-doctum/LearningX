@@ -17,6 +17,8 @@
   };
 
   const api = client(() => token, () => { token = null; go('login'); });
+  // Sign-in exchange: no token and no 401 redirect (a failed exchange must not re-enter the login screen).
+  const authApi = client(() => null);
   // Unit learning objective step, shown before evidence approval.
   const objectiveRules = window.QU.objectiveRules;
   const objectiveForm = window.QU.createObjectiveForm({ api, root: $('objective-form'), status: $('objective-status'),
@@ -98,11 +100,13 @@
   window.addEventListener('hashchange', render);
 
   /* ---------- 1 · 초대 코드 ---------- */
-  function renderLogin() {
+  async function renderLogin() {
     if (token) return go('courses');
     header({});
     screen('login');
     $('guest-start').focus();
+    // Back from Google sign-in: finish the exchange.
+    if (await resumeGoogle()) go('courses');
   }
 
   $('guest-start').addEventListener('click', async () => {
@@ -118,6 +122,101 @@
     } finally {
       busy(button, false);
     }
+  });
+
+  /* ---------- Google 로그인 (Neon Auth, 공유 자격증명) ---------- */
+  // The Neon Auth client is loaded only when Google sign-in is used.
+  const NEON_AUTH_URL = 'https://ep-empty-breeze-b3t239qi.neonauth.c-4.ap-southeast-1.aws.neon.tech/learningx/auth';
+  // Tokens stay in memory: after the 60-minute token expires, the Google button signs in again
+  // without a redirect while the Neon session is alive.
+  let neonAuth = null;
+  let pendingNeonToken = null;
+
+  function loadNeonAuth() {
+    if (neonAuth) return Promise.resolve(neonAuth);
+    return new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      script.src = 'assets/vendor/neon-auth.js';
+      script.onload = () => { neonAuth = window.QUNeonAuth.create(NEON_AUTH_URL); resolve(neonAuth); };
+      script.onerror = () => reject(new Error('Google 로그인을 불러오지 못했어요.'));
+      document.head.append(script);
+    });
+  }
+
+  function returningFromGoogle() {
+    return new URLSearchParams(location.search).has('neon_auth_session_verifier');
+  }
+
+  // Neon session -> Neon JWT -> LearningX token. Returns true when signed in.
+  async function exchangeGoogle(invite) {
+    const auth = await loadNeonAuth();
+    if (!pendingNeonToken || invite === undefined) {
+      const { data } = await auth.getSession();
+      pendingNeonToken = data && data.session && data.session.token;
+      if (data && data.user) $('google-link-who').textContent = `${data.user.email} 계정을 연결합니다.`;
+    }
+    if (!pendingNeonToken) return false;
+    try {
+      const res = await authApi('/v1/auth/neon/session', { method: 'POST', body: { token: pendingNeonToken, ...(invite ? { invite } : {}) } });
+      token = res.access_token;
+      pendingNeonToken = null;
+      show($('google-link'), false);
+      return true;
+    } catch (err) {
+      const code = err.detail && err.detail.code;
+      if (code === 'invite_required') { show($('google-link'), true); $('google-invite').focus(); return false; }
+      if (code === 'invite_already_linked') throw new Error('이 초대 코드는 이미 다른 Google 계정에 연결돼 있어요. 운영진에게 문의해 주세요.');
+      if (err.status === 401 && invite) throw new Error('초대 코드를 확인해 주세요.');
+      if (err.status === 401) { pendingNeonToken = null; throw new Error('Google 로그인이 만료됐어요. 다시 로그인해 주세요.'); }
+      throw err;
+    }
+  }
+
+  async function resumeGoogle() {
+    if (!returningFromGoogle()) return false;
+    const button = $('google-start');
+    busy(button, true, '로그인 확인 중…');
+    try {
+      return await exchangeGoogle();
+    } catch (err) {
+      setError($('login-error'), err);
+      return false;
+    } finally { busy(button, false); }
+  }
+
+  $('google-start').addEventListener('click', async () => {
+    const button = $('google-start');
+    setError($('login-error'), null);
+    busy(button, true, 'Google로 이동 중…');
+    try {
+      if (await exchangeGoogle()) return go('courses');  // already signed in with Neon
+      if (!$('google-link').hidden) return busy(button, false);
+      const auth = await loadNeonAuth();
+      await auth.signIn.social({ provider: 'google', callbackURL: location.origin + location.pathname + location.search });
+    } catch (err) {
+      setError($('login-error'), err);
+      busy(button, false);
+    }
+  });
+
+  $('google-link').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const value = $('google-invite').value.trim();
+    if (!/^[A-Za-z0-9_-]{43}$/.test(value)) return setError($('login-error'), '베타 초대 코드 43자를 입력해 주세요.');
+    const button = $('google-link-submit');
+    setError($('login-error'), null);
+    busy(button, true, '연결하는 중…');
+    try {
+      if (await exchangeGoogle(value)) { $('google-invite').value = ''; go('courses'); }
+    } catch (err) {
+      setError($('login-error'), err);
+    } finally { busy(button, false); }
+  });
+
+  $('google-cancel').addEventListener('click', async () => {
+    show($('google-link'), false);
+    pendingNeonToken = null;
+    try { (await loadNeonAuth()).signOut(); } catch (_) { /* ignore */ }
   });
 
   /* ---------- 3 · 내 수업 ---------- */

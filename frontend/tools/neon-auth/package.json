@@ -1,0 +1,10 @@
+{
+  "name": "question-up-neon-auth-bundle",
+  "private": true,
+  "description": "Builds assets/vendor/neon-auth.js (Neon Auth client for the static teacher page).",
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=iife --minify --target=es2020 --legal-comments=eof --outfile=../../assets/vendor/neon-auth.js"
+  },
+  "dependencies": { "@neon/auth": "0.8.2" },
+  "devDependencies": { "esbuild": "0.24.2" }
+}

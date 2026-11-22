@@ -131,6 +131,12 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.ok(quObjective.includes("card('단원 학습목표 *'") && quObjective.includes("card('확인할 수행 증거 *'"), 'required fields are marked with *');
  assert.ok(!quObjective.includes("card('목표 사고 과정 *'") && !quObjective.includes("card('코칭 지원 정도 *'"), 'defaulted fields are not marked');
  assert.ok(teacher.includes('class="objective-legend"'), 'the * legend is shown');
+ // Google sign-in (Neon Auth): lazy-loaded client, exchange without the 401 redirect, invite linking.
+ assert.ok(teacher.includes('id="google-start"') && teacher.includes('id="google-link"'), 'Google sign-in markup');
+ assert.ok(!/<script src="assets\/vendor\/neon-auth\.js"/.test(teacher), 'the Neon Auth bundle is not loaded up front');
+ assert.ok(fs.existsSync(path.join(root,'assets/vendor/neon-auth.js')), 'vendored Neon Auth bundle');
+ assert.ok(quTeacher.includes("authApi('/v1/auth/neon/session'") && quTeacher.includes('const authApi = client(() => null)'),
+  'the exchange cannot loop through the 401 handler');
  const ctx = vm.createContext({window:{QU:{el(){}}}});
  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
  const R = ctx.window.QU.objectiveRules;

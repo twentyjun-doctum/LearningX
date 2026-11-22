@@ -506,3 +506,10 @@ html.live-view-expanded {overflow:hidden;}
 #question-batch-status:empty { display: none; }
 .question-review-target { text-align: start; overflow-wrap: anywhere; }
 .question-review-target[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
+
+/* Teacher sign-in: guest class and beta faculty (Google via Neon Auth) */
+.login-divider{display:flex;align-items:center;gap:12px;margin:6px 0 0;font-size:12px;font-weight:600;color:var(--text-muted)}
+.login-divider::before,.login-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+.btn.google-btn,.btn.lg.google-btn{background:var(--surface);border:1px solid var(--border-strong);color:var(--ink);box-shadow:var(--shadow-xs)}
+.btn.google-btn:hover{border-color:var(--primary);color:var(--primary-strong)}
+#google-link{padding-top:4px}
