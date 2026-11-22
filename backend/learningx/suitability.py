@@ -736,8 +736,16 @@ def process(row_id, revision_id, gateway_factory=None, session_factory=None):
     return "unavailable"
 
 
+def _register_models():
+    """The worker process imports this module without the API: load the tables the
+    check rows reference (session_questions, class_sessions, objectives) first, or
+    SQLAlchemy fails every query with NoReferencedTableError."""
+    from . import classroom, objectives  # noqa: F401  (import registers the tables)
+
+
 def poll_once(gateway_factory=None):
     from .storage import SessionLocal
+    _register_models()
     with SessionLocal() as db:
         claimed = claim(db)
     if claimed is None:

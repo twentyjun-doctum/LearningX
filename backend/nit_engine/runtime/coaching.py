@@ -200,7 +200,11 @@ def run_coaching(out, question, policy, teacher_approved, signing_secret, authen
             answer['attempts']=attempt+1
             return answer
         except (GatewayFailure,InvalidModelOutput) as ex:
-            errors.append(type(ex).__name__)
+            # Gateway messages are written to be safe (status code or error class, never the
+            # body, URL query or key); model output text is never recorded.
+            errors.append(type(ex).__name__+(': '+str(ex)[:80] if isinstance(ex,GatewayFailure) else ''))
     answer=_fallback_for(reason='model_validation_or_transport_failed')
     answer['attempts']=RETRY_LIMIT+1
+    # Kept with the stored coaching for operators; student and board views whitelist their fields.
+    answer['model_errors']=errors[-3:]
     return answer
