@@ -520,3 +520,14 @@ html.live-view-expanded {overflow:hidden;}
 .role-card:hover,.role-card:focus-visible{border-color:var(--primary);background:var(--primary-soft);outline:none;box-shadow:0 0 0 3px var(--primary-soft)}
 .role-card:disabled{opacity:.6;cursor:progress}
 @media (max-width:420px){.role-grid{grid-template-columns:1fr}}
+
+/* Entry: one school Google sign-in for students and faculty */
+.entry-login{max-width:520px;padding-top:56px}
+.login-card{padding:32px;gap:18px}
+.login-card h1{font-size:26px;font-weight:700;text-align:left;margin:0}
+.login-other{border-top:1px solid var(--border);padding-top:14px}
+.login-other>summary{cursor:pointer;font-size:14px;font-weight:600;color:var(--text-sub);list-style:none}
+.login-other>summary::-webkit-details-marker{display:none}
+.login-other>summary::before{content:'▸ ';color:var(--text-muted)}
+.login-other[open]>summary::before{content:'▾ '}
+.login-other>.stack{margin-top:14px}

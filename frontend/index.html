@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Question-up · 수업 입장</title>
+<title>Question-up · 로그인</title>
 <link rel="icon" href="assets/brand/question-up-app-icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-kr@5/400.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/noto-sans-kr@5/700.css">
@@ -14,33 +14,44 @@
   <a class="qu-brand" href="index.html"><img src="assets/brand/question-up-app-icon.svg" alt="">Question-up</a>
   <div class="right"><a class="btn ghost sm" href="intro.html">서비스 소개</a></div>
 </header>
-<main class="entry" id="main">
-  <h1>어떻게 참여하시나요?</h1>
-  <div class="grid-2">
-    <section class="card stack" aria-labelledby="student-title">
-      <span class="eyebrow">학생</span>
-      <h2 id="student-title">수업 코드로 입장</h2>
-      <p class="sub">교수자 화면에 보이는 6자리 코드를 입력하세요. 로그인은 필요 없습니다.</p>
-      <form id="join-form" class="stack" action="student.html" method="get" novalidate>
-        <div class="field">
-          <label for="join-code">수업 코드</label>
-          <input id="join-code" name="code" class="input code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="K7M4QX" maxlength="12" required>
-        </div>
-        <p id="join-error" class="error" hidden>6자리 코드를 확인해 주세요.</p>
-        <button class="btn lg block" type="submit">입장하기</button>
-      </form>
-      <p class="muted">다른 학생에게는 내가 쓴 질문이 보이지 않습니다.</p>
-    </section>
-    <section class="card stack" aria-labelledby="faculty-title">
-      <span class="eyebrow">교수자</span>
-      <h2 id="faculty-title">내 수업 관리</h2>
-      <p class="sub">교안을 올리고 학생에게 보여 줄 근거를 승인한 뒤 수업을 시작합니다.</p>
-      <a class="btn block" href="teacher.html">교수자로 시작</a>
-      <p class="muted">로그인 없이 체험 수업을 열 수 있습니다.</p>
-    </section>
-  </div>
+<main class="entry entry-login" id="main">
+  <section class="card stack login-card" aria-labelledby="login-title">
+    <div>
+      <h1 id="login-title">Question-up에 로그인</h1>
+      <p class="sub">학생과 교수자 모두 학교 Google 계정 하나로 시작해요.</p>
+    </div>
+    <p class="error" id="login-error" role="alert" hidden></p>
+    <button id="google-start" class="btn lg block" type="button">학교 Google 계정으로 로그인</button>
+    <p class="small muted" id="google-note">처음 한 번만 학생·교수자를 고르면, 다음부터는 맞는 화면으로 바로 이동해요. Google 계정 선택 화면에는 인증 대행 서비스(Neon) 이름이 표시됩니다.</p>
+    <div class="stack" id="google-role" hidden>
+      <div><strong>처음 한 번만 역할을 골라 주세요</strong>
+        <p class="small muted" id="google-role-email"></p></div>
+      <div class="role-grid" role="group" aria-label="역할 선택">
+        <button class="role-card" type="button" data-role="student"><b>학생</b><span class="small">수업 코드로 참여해 질문해요</span></button>
+        <button class="role-card" type="button" data-role="faculty"><b>교수자</b><span class="small">교안을 올리고 수업을 열어요</span></button>
+      </div>
+      <p class="small muted">고른 역할은 저장되어 다음부터는 자동으로 구분돼요. 바꾸려면 운영진에게 문의해 주세요.</p>
+      <button class="btn" type="button" id="google-cancel">다른 계정으로 로그인</button>
+    </div>
+    <details class="login-other" id="login-other">
+      <summary>로그인 없이 이용하기</summary>
+      <div class="stack">
+        <form id="join-form" class="stack" action="student.html" method="get" novalidate>
+          <div class="field">
+            <label for="join-code">수업 코드로 익명 참여</label>
+            <input id="join-code" name="code" class="input code" inputmode="text" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="K7M4QX" maxlength="12" required>
+          </div>
+          <p id="join-error" class="error" hidden>6자리 코드를 확인해 주세요.</p>
+          <button class="btn block" type="submit">입장하기</button>
+        </form>
+        <a class="btn ghost block" href="teacher.html">교수자 체험 수업 열기</a>
+      </div>
+    </details>
+  </section>
 </main>
 <footer class="entry-foot"><span>Question-up 베타</span><a href="intro.html">서비스 소개</a></footer>
+<script src="assets/qu-api.js"></script>
+<script src="assets/qu-google.js"></script>
 <script src="assets/qu-entry.js"></script>
 </body>
 </html>

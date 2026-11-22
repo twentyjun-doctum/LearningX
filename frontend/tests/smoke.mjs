@@ -31,6 +31,12 @@ assert.ok(cfg.headers[0].headers.some(h=>h.key==='Content-Security-Policy'));
 // Question-up redesign: entry, teacher and student flows.
 const entry=fs.readFileSync(path.join(root,'index.html'),'utf8');
 for(const id of ['join-code'])assert.match(entry,new RegExp(`id="${id}"`));
+// Entry: one school Google sign-in for both roles; anonymous join and the faculty trial stay available.
+for(const id of ['google-start','google-role','google-cancel','login-other','join-form'])assert.match(entry,new RegExp(`id="${id}"`));
+{ const sc=[...entry.matchAll(/<script src="assets\/([^"]+)"/g)].map(m=>m[1]);
+  assert.deepEqual(sc,['qu-api.js','qu-google.js','qu-entry.js'],'entry loads the API client, Google module, then entry');
+  assert.ok(entry.includes('data-role="student"')&&entry.includes('data-role="faculty"'),'role choice on the entry page');
+  assert.ok(entry.includes('href="teacher.html"'),'faculty trial still reachable'); }
 assert.match(entry,/teacher\.html/);
 const teacher=fs.readFileSync(path.join(root,'teacher.html'),'utf8');
 for(const id of ['guest-start','course-list','upload-form','candidate-list','ai-consent','approve-start','board','level-filter','projector','export-csv'])assert.match(teacher,new RegExp(`id="${id}"`));
