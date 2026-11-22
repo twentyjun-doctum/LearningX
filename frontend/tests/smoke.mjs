@@ -40,7 +40,7 @@ for(const html of [entry,teacher,student]){
  assert.doesNotMatch(html,/\sstyle=/,'CSP forbids inline style attributes');
  assert.doesNotMatch(html,/<script>(?!<\/script>)|<script(?![^>]*\bsrc=)[^>]*>/,'CSP forbids inline scripts');
 }
-for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu-plant.js','qu-live.js','qu-live-protocol.js','qu-objective.js']){
+for(const file of ['qu-api.js','qu-entry.js','qu-teacher.js','qu-student.js','qu-plant.js','qu-live.js','qu-live-protocol.js','qu-objective.js','qu-google.js']){
  const src=fs.readFileSync(path.join(root,'assets',file),'utf8');
  assert.doesNotMatch(src,/localStorage|sessionStorage|document\.cookie|indexedDB/,`${file} must keep tokens in memory only`);
  assert.doesNotMatch(src,/innerHTML|insertAdjacentHTML|eval\(|new Function/,`${file} must not inject HTML or code`);
@@ -131,12 +131,23 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.ok(quObjective.includes("card('단원 학습목표 *'") && quObjective.includes("card('확인할 수행 증거 *'"), 'required fields are marked with *');
  assert.ok(!quObjective.includes("card('목표 사고 과정 *'") && !quObjective.includes("card('코칭 지원 정도 *'"), 'defaulted fields are not marked');
  assert.ok(teacher.includes('class="objective-legend"'), 'the * legend is shown');
- // Google sign-in (Neon Auth): lazy-loaded client, exchange without the 401 redirect, invite linking.
- assert.ok(teacher.includes('id="google-start"') && teacher.includes('id="google-link"'), 'Google sign-in markup');
- assert.ok(!/<script src="assets\/vendor\/neon-auth\.js"/.test(teacher), 'the Neon Auth bundle is not loaded up front');
+ // School Google sign-in (Neon Auth): shared module, lazy client, one-time role choice on both pages.
+ const quGoogle = fs.readFileSync(path.join(root,'assets/qu-google.js'),'utf8');
+ const studentHtml = fs.readFileSync(path.join(root,'student.html'),'utf8');
+ const quStudentSrc = fs.readFileSync(path.join(root,'assets/qu-student.js'),'utf8');
+ for (const page of [teacher, studentHtml]) {
+  assert.ok(page.includes('id="google-start"') && page.includes('id="google-role"') && page.includes('data-role="faculty"') && page.includes('data-role="student"'), 'role choice on both pages');
+  assert.ok(!/<script src="assets\/vendor\/neon-auth\.js"/.test(page), 'the Neon Auth bundle is not loaded up front');
+  const scripts = [...page.matchAll(/<script src="assets\/([^"]+)"/g)].map(m=>m[1]);
+  assert.ok(scripts.indexOf('qu-api.js') < scripts.indexOf('qu-google.js'), 'qu-google.js loads after the API client');
+ }
+ assert.ok(!teacher.includes('google-invite'), 'no invite code step any more');
  assert.ok(fs.existsSync(path.join(root,'assets/vendor/neon-auth.js')), 'vendored Neon Auth bundle');
- assert.ok(quTeacher.includes("authApi('/v1/auth/neon/session'") && quTeacher.includes('const authApi = client(() => null)'),
+ assert.ok(quGoogle.includes("'role_required'") && quGoogle.includes('/v1/auth/neon/session'), 'first sign-in asks for a role');
+ assert.ok(quTeacher.includes('const authApi = client(() => null)') && quStudentSrc.includes('const authApi = client(() => null)'),
   'the exchange cannot loop through the 401 handler');
+ assert.ok(quTeacher.includes("google.goTo('student.html')") && quStudentSrc.includes("google.goTo('teacher.html')"), 'each role is sent to its page');
+ assert.ok(quStudentSrc.includes('client(() => joinTicket)'), 'a Google student joins with the join ticket');
  const ctx = vm.createContext({window:{QU:{el(){}}}});
  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
  const R = ctx.window.QU.objectiveRules;

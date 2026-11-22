@@ -1,23 +1,23 @@
-"""Faculty sign-in with Google through Neon Auth (Managed Better Auth).
+"""Google sign-in through Neon Auth (Managed Better Auth) for faculty and students.
 
-The static frontend signs in with Neon Auth directly (Google, Neon's shared
-OAuth credentials for now) and sends the Neon-issued JWT here. This module
-verifies it against Neon's JWKS (EdDSA, iss = aud = the auth origin) and
-exchanges it for LearningX's own short session token, so every existing API and
-permission check stays unchanged. No cookie is shared between the two origins.
+The static pages sign in with Neon Auth directly (Google, Neon's shared OAuth
+credentials for now) and send the Neon-issued JWT here. This module verifies it
+against Neon's JWKS (EdDSA, iss = aud = the auth origin) and exchanges it for a
+LearningX token, so the existing APIs and permission checks stay unchanged. No
+cookie is shared between the two origins.
 
-A Google account becomes a faculty login only after it is linked once to an
-operator-issued beta invite (NIT_BETA_FACULTY_INVITES). Linking is by the Neon
-user id (``sub``), never by email, so an unverified or reused email cannot claim
-someone else's account.
+Who gets in: a Google-verified email on an allowed school domain
+(NIT_GOOGLE_ALLOWED_DOMAINS). The first sign-in chooses student or faculty once;
+the choice is stored and later sign-ins are classified from the database. An
+existing account with the same verified email keeps its stored role. Accounts
+are linked by the Neon user id (``sub``) after that, never by email again.
 """
 import base64
-import hashlib
-import json
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import Literal
 from urllib.parse import urlparse
 
 import httpx
@@ -29,12 +29,14 @@ from sqlalchemy import DateTime, ForeignKey, String
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
-from .security import issue_token, session
+from .security import issue_token, secret, session
 from .storage import Base, User
 
 # Public endpoint of the learningx-pilot main branch (not a secret); override per environment.
 DEFAULT_AUTH_URL = "https://ep-empty-breeze-b3t239qi.neonauth.c-4.ap-southeast-1.aws.neon.tech/learningx/auth"
 JWKS_TTL_SECONDS = 600
+DEFAULT_ALLOWED_DOMAINS = "hanyang.ac.kr"
+STUDENT_TICKET_MINUTES = 30
 
 router = APIRouter(prefix="/v1")
 
@@ -48,9 +50,19 @@ def auth_origin() -> str:
     return f"{parsed.scheme}://{parsed.netloc}"
 
 
-class FacultyIdentity(Base):
-    """A Neon Auth user linked to one LearningX faculty account (new table only)."""
-    __tablename__ = "faculty_identities"
+def allowed_domains() -> list[str]:
+    raw = os.getenv("NIT_GOOGLE_ALLOWED_DOMAINS", DEFAULT_ALLOWED_DOMAINS)
+    return [d.strip().lower().lstrip("@.") for d in raw.split(",") if d.strip()]
+
+
+def domain_allowed(email: str) -> bool:
+    domain = email.rsplit("@", 1)[-1].lower() if "@" in email else ""
+    return bool(domain) and any(domain == d or domain.endswith("." + d) for d in allowed_domains())
+
+
+class GoogleIdentity(Base):
+    """A Neon Auth (Google) user linked to one LearningX account (new table only)."""
+    __tablename__ = "google_identities"
     provider_sub: Mapped[str] = mapped_column(String(64), primary_key=True)
     user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), unique=True, nullable=False)
     provider: Mapped[str] = mapped_column(String(16), nullable=False, default="neon_google")
@@ -115,44 +127,58 @@ def verify(token: str, fetch=None) -> dict:
 
 class NeonSessionIn(BaseModel):
     token: str = Field(min_length=20, max_length=8192)
-    invite: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{43}$")
+    # Only read on the very first sign-in; afterwards the stored role decides.
+    role: Literal["student", "faculty"] | None = None
 
 
-def _invited_faculty(db, code):
-    """Same rule as /v1/beta/faculty/session: a per-faculty 256-bit operator invite."""
-    try:
-        invites = json.loads(os.getenv("NIT_BETA_FACULTY_INVITES", "{}"))
-    except ValueError:
-        invites = {}
-    if not isinstance(invites, dict) or not invites:
-        raise HTTPException(503, "Faculty beta is not enabled")
-    user_id = invites.get(hashlib.sha256(code.encode("ascii")).hexdigest())
-    user = db.get(User, user_id) if isinstance(user_id, str) and user_id else None
-    if not user or not user.active or user.role != "faculty":
-        raise HTTPException(401, "Invalid beta invitation")
-    return user
+def student_ticket(user_id: str) -> str:
+    """A short account ticket a Google student presents to /v1/join. It opens no other API:
+    the classroom guard rejects any scope but a session-bound one."""
+    now = datetime.now(timezone.utc)
+    return jwt.encode({"sub": user_id, "aud": "learningx", "iss": "learningx-server", "iat": now,
+                       "exp": now + timedelta(minutes=STUDENT_TICKET_MINUTES), "scope": "student_account"},
+                      secret(), algorithm="HS256")
+
+
+def _granted(user: User) -> dict:
+    if user.role == "faculty":
+        return {"role": "faculty", "access_token": issue_token(user.id, minutes=60), "expires_in": 3600}
+    return {"role": "student", "join_ticket": student_ticket(user.id), "expires_in": STUDENT_TICKET_MINUTES * 60}
 
 
 @router.post("/auth/neon/session")
 def neon_session(data: NeonSessionIn, response: Response, db: Session = Depends(session)):
     claims = verify(data.token)
     response.headers["Cache-Control"] = "no-store"
-    identity = db.get(FacultyIdentity, claims["sub"])
+    email = str(claims.get("email") or "").strip().lower()
+    if claims.get("emailVerified") is not True or "@" not in email:
+        raise HTTPException(403, {"code": "email_unverified"})
+    if not domain_allowed(email):
+        raise HTTPException(403, {"code": "domain_not_allowed", "domains": allowed_domains()})
+    identity = db.get(GoogleIdentity, claims["sub"])
     if identity is None:
-        if not data.invite:
-            # First Google sign-in: the account must be linked once with a beta invite.
-            raise HTTPException(403, {"code": "invite_required"})
-        user = _invited_faculty(db, data.invite)
-        if db.query(FacultyIdentity).filter_by(user_id=user.id).first():
-            raise HTTPException(409, {"code": "invite_already_linked"})
-        db.add(FacultyIdentity(provider_sub=claims["sub"], user_id=user.id))
+        user = db.query(User).filter(User.email == email).first()
+        if user is None:
+            if data.role is None:
+                # First sign-in: the person chooses student or faculty once.
+                raise HTTPException(403, {"code": "role_required", "email": email})
+            user = User(email=email, role=data.role, active=True)
+            db.add(user)
+            db.flush()
+        elif user.role not in ("student", "faculty"):
+            raise HTTPException(403, {"code": "account_inactive"})
+        db.add(GoogleIdentity(provider_sub=claims["sub"], user_id=user.id))
         try:
             db.commit()
         except IntegrityError:
+            # The same account was linked by a parallel sign-in (or to another Google user).
             db.rollback()
-            raise HTTPException(409, {"code": "invite_already_linked"})
-        identity = db.get(FacultyIdentity, claims["sub"])
+            identity = db.get(GoogleIdentity, claims["sub"])
+            if identity is None:
+                raise HTTPException(409, {"code": "account_already_linked"})
+        else:
+            identity = db.get(GoogleIdentity, claims["sub"])
     user = db.get(User, identity.user_id)
-    if not user or not user.active or user.role != "faculty":
+    if not user or not user.active or user.role not in ("student", "faculty"):
         raise HTTPException(403, {"code": "account_inactive"})
-    return {"access_token": issue_token(user.id, minutes=60), "expires_in": 3600}
+    return _granted(user)

@@ -1,6 +1,5 @@
-"""Faculty Google sign-in through Neon Auth: JWT verification and invite linking."""
+"""Google sign-in through Neon Auth: JWT checks, school-domain approval, one-time role choice."""
 import base64
-import hashlib
 import json
 import os
 import tempfile
@@ -22,7 +21,8 @@ from fastapi.testclient import TestClient
 from learningx import neon_identity as ni
 from learningx.api import app
 from learningx.security import decode_token
-from learningx.storage import SessionLocal, User, uid
+from learningx.storage import Course, Material, Member, SessionLocal, User, uid
+from learningx import engine_adapter as nit
 
 AUTH_URL = "https://ep-test.neonauth.example.neon.tech/learningx/auth"
 ORIGIN = "https://ep-test.neonauth.example.neon.tech"
@@ -61,18 +61,8 @@ class NeonIdentityTests(unittest.TestCase):
                 base64.urlsafe_b64decode(k["x"] + "==")) for k in self.jwks["keys"]}
 
         ni._jwks.update(keys={}, fetched=0.0, url=None)
-        with SessionLocal() as db:
-            faculty = User(email=f"invited-{uid()}@test.local", role="faculty")
-            other = User(email=f"invited2-{uid()}@test.local", role="faculty")
-            db.add_all([faculty, other])
-            db.commit()
-            self.faculty_id, self.other_id = faculty.id, other.id
-        self.invite = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-        self.invite2 = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
-        invites = {hashlib.sha256(self.invite.encode()).hexdigest(): self.faculty_id,
-                   hashlib.sha256(self.invite2.encode()).hexdigest(): self.other_id}
         self.patches = [patch.dict(os.environ, {"NIT_NEON_AUTH_URL": AUTH_URL,
-                                                "NIT_BETA_FACULTY_INVITES": json.dumps(invites)}),
+                                                "NIT_GOOGLE_ALLOWED_DOMAINS": "hanyang.ac.kr, school.edu"}),
                         patch.object(ni, "_fetch_jwks", fetch)]
         for p in self.patches:
             p.start()
@@ -83,39 +73,66 @@ class NeonIdentityTests(unittest.TestCase):
 
     def token(self, sub=None, key=None, kid="k1", **claims):
         now = int(time.time())
-        payload = {"sub": sub or ("neon-" + uid()), "email": "teacher@gmail.com", "iat": now, "exp": now + 900,
-                   "iss": ORIGIN, "aud": ORIGIN, "role": "authenticated", "banned": False, **claims}
+        payload = {"sub": sub or ("neon-" + uid()), "email": f"user-{uid()[:8]}@hanyang.ac.kr", "emailVerified": True,
+                   "iat": now, "exp": now + 900, "iss": ORIGIN, "aud": ORIGIN, "role": "authenticated",
+                   "banned": False, **claims}
         return jwt.encode(payload, key or self.private, algorithm="EdDSA", headers={"kid": kid})
 
-    def exchange(self, token, invite=None):
-        body = {"token": token, **({"invite": invite} if invite else {})}
+    def exchange(self, token, role=None):
+        body = {"token": token, **({"role": role} if role else {})}
         return self.client.post("/v1/auth/neon/session", json=body)
 
-    def test_first_sign_in_links_with_an_invite_then_signs_in_directly(self):
-        sub = "neon-" + uid()
-        first = self.exchange(self.token(sub))
-        self.assertEqual((first.status_code, first.json()["detail"]["code"]), (403, "invite_required"))
-        linked = self.exchange(self.token(sub), self.invite)
-        self.assertEqual(linked.status_code, 200, linked.text)
-        self.assertEqual(linked.headers["cache-control"], "no-store")
-        self.assertEqual(decode_token(Creds(linked.json()["access_token"]))["sub"], self.faculty_id)
-        again = self.exchange(self.token(sub))
-        self.assertEqual(decode_token(Creds(again.json()["access_token"]))["sub"], self.faculty_id,
-                         "later sign-ins need no invite")
-        courses = self.client.get("/v1/courses/mine", headers={"Authorization": "Bearer " + again.json()["access_token"]})
-        self.assertEqual(courses.status_code, 200, "the exchanged token works on existing APIs")
+    def test_first_sign_in_chooses_a_role_once_then_the_database_decides(self):
+        sub, email = "neon-" + uid(), f"prof-{uid()[:6]}@hanyang.ac.kr"
+        first = self.exchange(self.token(sub, email=email))
+        self.assertEqual(first.status_code, 403)
+        self.assertEqual(first.json()["detail"], {"code": "role_required", "email": email})
+        chosen = self.exchange(self.token(sub, email=email), role="faculty")
+        self.assertEqual((chosen.status_code, chosen.json()["role"]), (200, "faculty"), chosen.text)
+        self.assertEqual(chosen.headers["cache-control"], "no-store")
+        again = self.exchange(self.token(sub, email=email), role="student")
+        self.assertEqual(again.json()["role"], "faculty", "the stored role wins; a later choice is ignored")
+        token = again.json()["access_token"]
+        self.assertEqual(self.client.get("/v1/courses/mine", headers={"Authorization": "Bearer " + token}).status_code, 200)
+        with SessionLocal() as db:
+            self.assertEqual(db.query(User).filter_by(email=email).one().role, "faculty")
 
-    def test_an_invite_links_only_one_google_account(self):
-        self.assertEqual(self.exchange(self.token(), self.invite).status_code, 200)
-        taken = self.exchange(self.token(), self.invite)
-        self.assertEqual((taken.status_code, taken.json()["detail"]["code"]), (409, "invite_already_linked"))
-        self.assertEqual(self.exchange(self.token(), "A" * 43).status_code, 401)
+    def test_students_get_a_join_ticket_that_opens_nothing_else(self):
+        res = self.exchange(self.token(), role="student")
+        self.assertEqual(res.json()["role"], "student")
+        ticket = res.json()["join_ticket"]
+        self.assertNotIn("access_token", res.json())
+        mine = self.client.get("/v1/courses/mine", headers={"Authorization": "Bearer " + ticket})
+        self.assertEqual(mine.status_code, 403, "a join ticket is not a general login")
 
-    def test_linking_is_by_neon_user_id_not_email(self):
-        sub = "neon-" + uid()
-        self.exchange(self.token(sub, email="shared@gmail.com"), self.invite)
-        imposter = self.exchange(self.token(email="shared@gmail.com"))
-        self.assertEqual(imposter.json()["detail"]["code"], "invite_required", "same email, different account")
+    def test_only_verified_school_emails_are_admitted(self):
+        for claims, code in (({"email": "someone@gmail.com"}, "domain_not_allowed"),
+                             ({"email": "someone@hanyang.ac.kr.evil.com"}, "domain_not_allowed"),
+                             ({"email": "someone@nothanyang.ac.kr"}, "domain_not_allowed"),
+                             ({"emailVerified": False}, "email_unverified"),
+                             ({"email": ""}, "email_unverified")):
+            with self.subTest(claims=claims):
+                res = self.exchange(self.token(**claims), role="faculty")
+                self.assertEqual((res.status_code, res.json()["detail"]["code"]), (403, code))
+        sub_domain = self.exchange(self.token(email=f"x-{uid()[:6]}@cs.hanyang.ac.kr"), role="student")
+        self.assertEqual(sub_domain.status_code, 200, "department subdomains of an allowed domain are admitted")
+        other = self.exchange(self.token(email=f"x-{uid()[:6]}@school.edu"), role="student")
+        self.assertEqual(other.status_code, 200, "several domains can be allowed")
+
+    def test_an_existing_account_with_the_same_email_keeps_its_role(self):
+        email = f"pilot-{uid()[:6]}@hanyang.ac.kr"
+        with SessionLocal() as db:
+            db.add(User(email=email, role="faculty"))
+            db.commit()
+        res = self.exchange(self.token(email=email))
+        self.assertEqual(res.json()["role"], "faculty", "no role question for a known account")
+
+    def test_linking_is_by_neon_user_id_after_the_first_sign_in(self):
+        sub, email = "neon-" + uid(), f"t-{uid()[:6]}@hanyang.ac.kr"
+        self.exchange(self.token(sub, email=email), role="faculty")
+        other = self.exchange(self.token(email=email))
+        self.assertEqual((other.status_code, other.json()["detail"]["code"]), (409, "account_already_linked"),
+                         "another Neon user with the same email cannot take the account")
 
     def test_tokens_that_fail_verification_are_rejected(self):
         other_key, _ = keypair("k1")
@@ -133,24 +150,54 @@ class NeonIdentityTests(unittest.TestCase):
         }
         for name, token in cases.items():
             with self.subTest(name):
-                self.assertEqual(self.exchange(token, self.invite).status_code, 401)
+                self.assertEqual(self.exchange(token, role="faculty").status_code, 401)
 
     def test_rotated_keys_are_fetched_and_jwks_is_cached(self):
-        self.exchange(self.token(), self.invite)
-        self.exchange(self.token())
+        self.exchange(self.token(), role="student")
+        self.exchange(self.token(), role="student")
         self.assertEqual(self.fetches, 1, "keys are cached")
         new_private, new_jwk = keypair("k2")
         self.jwks["keys"].append(new_jwk)
         ni._jwks["fetched"] -= 60  # past the short refetch guard
         res = self.exchange(self.token(key=new_private, kid="k2"))
-        self.assertEqual(res.json()["detail"]["code"], "invite_required", "verified with the rotated key")
+        self.assertEqual(res.json()["detail"]["code"], "role_required", "verified with the rotated key")
         self.assertEqual(self.fetches, 2)
 
     def test_jwks_outage_is_a_503_not_a_login(self):
         def down(url):
             raise RuntimeError("network")
         with patch.object(ni, "_fetch_jwks", down):
-            self.assertEqual(self.exchange(self.token(), self.invite).status_code, 503)
+            self.assertEqual(self.exchange(self.token(), role="faculty").status_code, 503)
+
+    def test_a_google_student_joins_classes_as_the_same_account(self):
+        folder = Path(TEMP.name) / ("lesson-" + uid())
+        folder.mkdir(parents=True)
+        (folder / "document.json").write_text(json.dumps({"pages": [{"page": 1, "blocks": []}]}))
+        faculty = self.exchange(self.token(), role="faculty").json()["access_token"]
+        with SessionLocal() as db:
+            fid = decode_token(Creds(faculty))["sub"]
+            course = Course(title="집단극화", policy="PERMITTED", teacher_approved=True, created_by=fid)
+            db.add(course)
+            db.flush()
+            db.add(Member(course_id=course.id, user_id=fid, role="faculty"))
+            material = Material(course_id=course.id, filename="l.pdf", sha256="c" * 64, out_dir=str(folder), ingested_by=fid)
+            db.add(material)
+            db.commit()
+            course_id, material_id = course.id, material.id
+        with patch.object(nit, "verified_count", return_value=1):
+            opened = self.client.post(f"/v1/courses/{course_id}/sessions", json={"material_id": material_id},
+                                      headers={"Authorization": "Bearer " + faculty}).json()
+        ticket = self.exchange(self.token(), role="student").json()["join_ticket"]
+        first = self.client.post("/v1/join", json={"code": opened["join_code"]}, headers={"Authorization": "Bearer " + ticket})
+        again = self.client.post("/v1/join", json={"code": opened["join_code"]}, headers={"Authorization": "Bearer " + ticket})
+        self.assertEqual((first.status_code, again.status_code), (200, 200), first.text)
+        a, b = (decode_token(Creds(r.json()["access_token"])) for r in (first, again))
+        self.assertEqual(a["sub"], b["sub"], "rejoining keeps the same student account")
+        self.assertEqual(a["session_id"], opened["id"])
+        anon = self.client.post("/v1/join", json={"code": opened["join_code"]})
+        self.assertNotEqual(decode_token(Creds(anon.json()["access_token"]))["sub"], a["sub"], "anonymous join still works")
+        wrong = self.client.post("/v1/join", json={"code": opened["join_code"]}, headers={"Authorization": "Bearer " + faculty})
+        self.assertEqual(wrong.status_code, 403, "only a student ticket joins as an account")
 
 
 if __name__ == "__main__":

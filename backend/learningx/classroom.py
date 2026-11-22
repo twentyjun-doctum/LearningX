@@ -1145,8 +1145,22 @@ def export(session_id: str, db: Session = Depends(session), user: User = Depends
 
 # ---------- student endpoints ----------
 
+def _google_student(db, credentials):
+    """The Google student behind an optional join ticket, or None for an anonymous join."""
+    if credentials is None:
+        return None
+    claims = decode_token(credentials)
+    if claims.get("scope") != "student_account":
+        raise HTTPException(403, "Join with a student account ticket or anonymously")
+    user = db.get(User, claims["sub"])
+    if not user or not user.active or user.role != "student":
+        raise HTTPException(403, "Student account is not active")
+    return user
+
+
 @router.post("/join")
-def join(data: JoinRequest, request: Request, response: Response, db: Session = Depends(session)):
+def join(data: JoinRequest, request: Request, response: Response, db: Session = Depends(session),
+         credentials: HTTPAuthorizationCredentials | None = Depends(scheme)):
     key, failures = _throttle(request)
     code = data.code.strip().upper()
     s = db.query(ClassSession).filter_by(join_code=code).first() if all(ch in JOIN_ALPHABET for ch in code) else None
@@ -1155,12 +1169,21 @@ def join(data: JoinRequest, request: Request, response: Response, db: Session = 
         raise HTTPException(404, "No open class with this code")
     if s.status == "PAUSED":
         raise HTTPException(423, "The class is not taking questions right now")
-    student = User(email=f"anon+{uid()}@join.question-up.local", role="student", active=True)
-    db.add(student)
-    db.flush()
-    db.add(Member(course_id=s.course_id, user_id=student.id, role="student"))
-    db.add(SessionParticipant(session_id=s.id, user_id=student.id))
-    _audit(db, student.id, s.course_id, "student_joined_anonymously", s.material_id)
+    student = _google_student(db, credentials)
+    if student is None:
+        student = User(email=f"anon+{uid()}@join.question-up.local", role="student", active=True)
+        db.add(student)
+        db.flush()
+    member = db.query(Member).filter_by(course_id=s.course_id, user_id=student.id).first()
+    if member is None:
+        db.add(Member(course_id=s.course_id, user_id=student.id, role="student"))
+    elif member.role != "student":
+        raise HTTPException(409, "This account already has another role in the course")
+    if not db.query(SessionParticipant).filter_by(session_id=s.id, user_id=student.id).first():
+        db.add(SessionParticipant(session_id=s.id, user_id=student.id))
+    # Other students and the faculty board never see who asked: questions stay anonymous on screen.
+    _audit(db, student.id, s.course_id,
+           "student_joined_with_google" if credentials else "student_joined_anonymously", s.material_id)
     db.commit()
     response.headers["Cache-Control"] = "no-store"
     return {"access_token": issue_token(student.id, minutes=STUDENT_TOKEN_MINUTES, session_id=s.id),
