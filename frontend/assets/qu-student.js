@@ -411,13 +411,13 @@
   function finishGoogle(result) {
     if (!result) return;
     if (result.needsRole) {
-      $('google-role-email').textContent = `${result.email} 계정으로 처음 로그인했어요.`;
+      $('google-role-email').textContent = google.roleIntro(result);
       show($('google-role'), true);
       paintGoogle();
       return;
     }
     show($('google-role'), false);
-    if (result.role === 'faculty') return google.goTo('teacher.html');
+    if (result.role === 'faculty') return google.goTo('teacher.html', 'faculty');
     joinTicket = result.join_ticket;
     google.clearReturnParams();
     paintGoogle();

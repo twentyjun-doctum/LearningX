@@ -152,7 +152,8 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.ok(quGoogle.includes("'role_required'") && quGoogle.includes('/v1/auth/neon/session'), 'first sign-in asks for a role');
  assert.ok(quTeacher.includes('const authApi = client(() => null)') && quStudentSrc.includes('const authApi = client(() => null)'),
   'the exchange cannot loop through the 401 handler');
- assert.ok(quTeacher.includes("google.goTo('student.html')") && quStudentSrc.includes("google.goTo('teacher.html')"), 'each role is sent to its page');
+ assert.ok(quTeacher.includes("google.goTo('student.html', 'student')") && quStudentSrc.includes("google.goTo('teacher.html', 'faculty')"), 'each role is sent to its page with the chosen role');
+ assert.ok(quGoogle.includes('roleHint()') && quGoogle.includes('detail.master'), 'masters choose a role on every sign-in without a second prompt');
  assert.ok(quStudentSrc.includes('client(() => joinTicket)'), 'a Google student joins with the join ticket');
  const ctx = vm.createContext({window:{QU:{el(){}}}});
  vm.runInContext(fs.readFileSync(path.join(root,'assets/qu-objective.js'),'utf8'), ctx);
