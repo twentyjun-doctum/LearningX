@@ -69,6 +69,18 @@ class EngineObjectiveTests(unittest.TestCase):
         self.assertEqual(payload["learning_objective"]["process"], "analyze")
         self.assertEqual(payload["learning_objective"]["guidelines"], ["자료와 해석을 나눠 말하도록 요청"])
 
+    def test_model_failures_keep_a_safe_reason_for_operators(self):
+        from runtime.gateway import GatewayFailure
+        gateway = Mock()
+        gateway.generate.side_effect = GatewayFailure("Provider HTTP status: 401")
+        result = coach(gateway)
+        self.assertEqual(result["reason"], "model_validation_or_transport_failed")
+        self.assertIn("GatewayFailure: Provider HTTP status: 401", result["model_errors"])
+        bad = coach(model({"not": "the schema"}))
+        self.assertEqual(bad["reason"], "model_validation_or_transport_failed")
+        self.assertTrue(bad["model_errors"] and all("not" not in e for e in bad["model_errors"]),
+                        "model output text is never recorded")
+
     def test_without_objective_the_contract_is_unchanged(self):
         gateway = model(answer())
         result = coach(gateway)
