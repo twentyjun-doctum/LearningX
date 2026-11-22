@@ -17,6 +17,8 @@
   };
 
   const api = client(() => token, () => { token = null; go('login'); });
+  // Sign-in exchange: no token and no 401 redirect (a failed exchange must not re-enter the login screen).
+  const authApi = client(() => null);
   // Unit learning objective step, shown before evidence approval.
   const objectiveRules = window.QU.objectiveRules;
   const objectiveForm = window.QU.createObjectiveForm({ api, root: $('objective-form'), status: $('objective-status'),
@@ -98,11 +100,13 @@
   window.addEventListener('hashchange', render);
 
   /* ---------- 1 · 초대 코드 ---------- */
-  function renderLogin() {
+  async function renderLogin() {
     if (token) return go('courses');
     header({});
     screen('login');
     $('guest-start').focus();
+    // Back from Google sign-in (or sent here by the student page): finish the exchange.
+    if (await resumeGoogle()) go('courses');
   }
 
   $('guest-start').addEventListener('click', async () => {
@@ -118,6 +122,74 @@
     } finally {
       busy(button, false);
     }
+  });
+
+  /* ---------- 학교 Google 로그인 (Neon Auth) ---------- */
+  // First sign-in picks a role once; later sign-ins are classified from the database.
+  const google = window.QU.createGoogleLogin({ api: authApi });
+
+  async function finishGoogle(result) {
+    if (!result) return false;
+    if (result.needsRole) {
+      $('google-role-email').textContent = `${result.email} 계정으로 처음 로그인했어요.`;
+      show($('google-role'), true);
+      $('google-role').querySelector('.role-card').focus();
+      return false;
+    }
+    show($('google-role'), false);
+    if (result.role === 'student') { google.goTo('student.html'); return false; }
+    token = result.access_token;
+    google.clearReturnParams();
+    return true;
+  }
+
+  async function resumeGoogle() {
+    if (!google.returning()) return false;
+    const button = $('google-start');
+    busy(button, true, '로그인 확인 중…');
+    try {
+      return await finishGoogle(await google.exchange());
+    } catch (err) {
+      setError($('login-error'), err);
+      return false;
+    } finally { busy(button, false); }
+  }
+
+  $('google-start').addEventListener('click', async () => {
+    const button = $('google-start');
+    setError($('login-error'), null);
+    busy(button, true, 'Google로 이동 중…');
+    try {
+      // A live Neon session signs in without leaving the page (for example after the 60-minute token expired).
+      if (await google.session()) {
+        if (await finishGoogle(await google.exchange())) return go('courses');
+        return busy(button, false);
+      }
+      await google.start();
+    } catch (err) {
+      setError($('login-error'), err);
+      busy(button, false);
+    }
+  });
+
+  $('google-role').addEventListener('click', async (event) => {
+    const card = event.target.closest('[data-role]');
+    if (!card) return;
+    setError($('login-error'), null);
+    $('google-role').querySelectorAll('[data-role]').forEach((b) => { b.disabled = true; });
+    try {
+      if (await finishGoogle(await google.exchange(card.dataset.role))) go('courses');
+    } catch (err) {
+      setError($('login-error'), err);
+    } finally {
+      $('google-role').querySelectorAll('[data-role]').forEach((b) => { b.disabled = false; });
+    }
+  });
+
+  $('google-cancel').addEventListener('click', async () => {
+    show($('google-role'), false);
+    await google.signOut();
+    $('google-start').focus();
   });
 
   /* ---------- 3 · 내 수업 ---------- */

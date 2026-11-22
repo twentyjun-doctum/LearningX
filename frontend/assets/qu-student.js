@@ -391,18 +391,79 @@
     setError($('join-error'), null);
   });
 
+  /* ---------- 학교 Google 로그인 (선택) ---------- */
+  // Optional: a Google student joins as the same account; questions stay anonymous on every screen.
+  const authApi = client(() => null);
+  const google = window.QU.createGoogleLogin({ api: authApi });
+  let joinTicket = null;
+  const show = (node, on) => { node.hidden = !on; };
+
+  function paintGoogle() {
+    const signedIn = !!joinTicket;
+    show($('google-start'), !signedIn);
+    show($('google-divider'), !signedIn);
+    show($('google-cancel'), signedIn || !$('google-role').hidden);
+    $('join-mode').textContent = signedIn
+      ? `학교 계정(${google.email()})으로 참여해요. 다른 학생과 교수자 화면에는 이름이 보이지 않아요.`
+      : '로그인 없이 익명으로 참여합니다. 다른 학생에게는 내 이름이 보이지 않아요.';
+  }
+
+  function finishGoogle(result) {
+    if (!result) return;
+    if (result.needsRole) {
+      $('google-role-email').textContent = `${result.email} 계정으로 처음 로그인했어요.`;
+      show($('google-role'), true);
+      paintGoogle();
+      return;
+    }
+    show($('google-role'), false);
+    if (result.role === 'faculty') return google.goTo('teacher.html');
+    joinTicket = result.join_ticket;
+    google.clearReturnParams();
+    paintGoogle();
+    $('code').focus();
+  }
+
+  async function runGoogle(task) {
+    setError($('join-error'), null);
+    const button = $('google-start');
+    button.disabled = true;
+    try { finishGoogle(await task()); } catch (err) { setError($('join-error'), err); } finally { button.disabled = false; }
+  }
+
+  $('google-start').addEventListener('click', () => runGoogle(async () => {
+    if (await google.session()) return google.exchange();
+    await google.start();
+    return null;
+  }));
+  $('google-role').addEventListener('click', (event) => {
+    const card = event.target.closest('[data-role]');
+    if (card) runGoogle(() => google.exchange(card.dataset.role));
+  });
+  $('google-cancel').addEventListener('click', async () => {
+    joinTicket = null;
+    show($('google-role'), false);
+    await google.signOut();
+    paintGoogle();
+  });
+  if (google.returning()) runGoogle(() => google.exchange());
+
   async function join(code) {
     const btn = $('join-btn');
     btn.disabled = true; btn.textContent = '입장 중…';
     try {
-      const res = await api('/v1/join', { method: 'POST', body: { code } });
+      // With a Google join ticket the student joins as that account; without one, anonymously.
+      const joinApi = joinTicket ? client(() => joinTicket) : api;
+      const res = await joinApi('/v1/join', { method: 'POST', body: { code } });
       token = res.access_token;
       st.session = res.session;
       history.replaceState(null, '', location.pathname + (new URLSearchParams(location.search).get('api') ? `?api=${encodeURIComponent(new URLSearchParams(location.search).get('api'))}` : ''));
       startCoach(res.initial_live);
     } catch (err) {
       const msg = err.status === 404 ? '열려 있는 수업을 찾지 못했어요. 코드를 다시 확인해 주세요.'
-        : err.status === 423 ? '교수자가 잠시 질문 받기를 멈췄어요. 조금 뒤 다시 입장해 주세요.' : err;
+        : err.status === 423 ? '교수자가 잠시 질문 받기를 멈췄어요. 조금 뒤 다시 입장해 주세요.'
+          : err.status === 401 && joinTicket ? '학교 계정 로그인이 만료됐어요. 다시 로그인하거나 익명으로 참여해 주세요.' : err;
+      if (err.status === 401 && joinTicket) { joinTicket = null; paintGoogle(); }
       setError($('join-error'), msg);
     } finally {
       btn.disabled = false; btn.textContent = '입장하기';

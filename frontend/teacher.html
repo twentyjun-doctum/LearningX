@@ -38,6 +38,19 @@
       <p class="sub">교안을 올리고 승인한 뒤 수업을 시작하면 학생 입장 코드가 생성됩니다. 체험 수업의 질문 코칭은 기본 안내로 제공됩니다. 수업 관리에 사용하는 이 탭은 수업 종료까지 유지해 주세요.</p>
       <p class="error" id="login-error" hidden role="alert"></p>
       <button id="guest-start" class="btn lg block" type="button">체험 수업 시작</button>
+      <div class="login-divider" aria-hidden="true"><span>학교 계정</span></div>
+      <button id="google-start" class="btn lg block google-btn" type="button">학교 Google 계정으로 계속</button>
+      <p class="small muted" id="google-note">학교 이메일 Google 계정만 사용할 수 있어요. 로그인 화면에는 인증 대행 서비스(Neon) 이름이 표시됩니다.</p>
+      <div class="stack" id="google-role" hidden>
+        <div><strong>처음 한 번만 역할을 골라 주세요</strong>
+          <p class="small muted" id="google-role-email"></p></div>
+        <div class="role-grid" role="group" aria-label="역할 선택">
+          <button class="role-card" type="button" data-role="faculty"><b>교수자</b><span class="small">교안을 올리고 수업을 열어요</span></button>
+          <button class="role-card" type="button" data-role="student"><b>학생</b><span class="small">수업 코드로 참여해 질문해요</span></button>
+        </div>
+        <p class="small muted">고른 역할은 저장되어 다음부터는 자동으로 구분돼요. 바꾸려면 운영진에게 문의해 주세요.</p>
+        <button class="btn" type="button" id="google-cancel">다른 계정으로 로그인</button>
+      </div>
     </div>
   </section>
 
@@ -196,6 +209,7 @@
 
 <script src="assets/qu-api.js"></script>
 <script src="assets/qu-objective.js"></script>
+<script src="assets/qu-google.js"></script>
 <script src="assets/qu-live-protocol.js"></script>
 <script src="assets/qu-live.js"></script>
 <script src="assets/qu-teacher.js"></script>

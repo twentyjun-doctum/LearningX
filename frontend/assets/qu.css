@@ -506,3 +506,17 @@ html.live-view-expanded {overflow:hidden;}
 #question-batch-status:empty { display: none; }
 .question-review-target { text-align: start; overflow-wrap: anywhere; }
 .question-review-target[aria-pressed="true"] { font-weight: 700; text-decoration: underline; }
+
+/* Teacher sign-in: guest class and beta faculty (Google via Neon Auth) */
+.login-divider{display:flex;align-items:center;gap:12px;margin:6px 0 0;font-size:12px;font-weight:600;color:var(--text-muted)}
+.login-divider::before,.login-divider::after{content:'';flex:1;height:1px;background:var(--border)}
+.btn.google-btn,.btn.lg.google-btn{background:var(--surface);border:1px solid var(--border-strong);color:var(--ink);box-shadow:var(--shadow-xs)}
+.btn.google-btn:hover{border-color:var(--primary);color:var(--primary-strong)}
+#google-role{padding-top:4px}
+.role-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.role-card{display:flex;flex-direction:column;align-items:flex-start;gap:4px;min-height:76px;padding:14px 16px;border:1px solid var(--border-strong);border-radius:var(--radius-lg);background:var(--surface);color:var(--ink);font:inherit;text-align:left;cursor:pointer}
+.role-card b{font-size:16px}
+.role-card .small{color:var(--text-sub);line-height:1.4}
+.role-card:hover,.role-card:focus-visible{border-color:var(--primary);background:var(--primary-soft);outline:none;box-shadow:0 0 0 3px var(--primary-soft)}
+.role-card:disabled{opacity:.6;cursor:progress}
+@media (max-width:420px){.role-grid{grid-template-columns:1fr}}
