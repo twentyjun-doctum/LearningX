@@ -5,6 +5,7 @@ from collections import Counter
 from pathlib import Path
 
 SCHEMA = 'nit_lesson_v1_6_2'
+from glyph_repair import VERSION as GLYPH_REPAIR
 MAX_FILE_MB = 250
 
 
@@ -19,14 +20,29 @@ def compact(s):
     return re.sub(r'\s+', ' ', str(s or '')).strip()
 
 
+def _invisible_text_share(page):
+    """Share of characters drawn invisibly (render mode 3): a scanner's OCR layer."""
+    try:trace=page.get_texttrace()
+    except Exception:return 0.0
+    total=sum(len(s['chars']) for s in trace)
+    return sum(len(s['chars']) for s in trace if s.get('type')==3)/total if total else 0.0
+
+
 def text_blocks_pdf(page):
+    from text_normalization import repair_text
+    # An invisible text layer over a scan is someone else's OCR, unverified: it is kept for
+    # search and review but never treated as native text (not coaching evidence by itself).
+    ocr_layer=_invisible_text_share(page)>=0.8
     blocks=[]
     for n,b in enumerate(page.get_text('blocks', sort=True)):
         if len(b)>6 and b[6]!=0:continue
-        t=compact(b[4])
+        t,tags=repair_text(compact(b[4]))
         if not t:continue
-        blocks.append({'id':f'b{n:04d}', 'type':'text','text':t,
-                       'bbox':[round(float(x),1) for x in b[:4]],'origin':'native', 'source_type':'pdf_text', 'source_page':page.number+1})
+        block={'id':f'b{n:04d}', 'type':'text','text':t,
+               'bbox':[round(float(x),1) for x in b[:4]],'origin':'native', 'source_type':'pdf_text', 'source_page':page.number+1}
+        if tags:block['text_recovery']=tags
+        if ocr_layer:block.update(origin='ocr',source_type='pdf_ocr_layer')
+        blocks.append(block)
     return blocks
 
 
@@ -248,18 +264,33 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
                 and cached.get('parser_arbitration',{}).get('comparison_mode') ==
                 ('not_applicable_pptx' if source.suffix.lower()=='.pptx' else parser_mode)
                 and cached.get('ingest_config',{}).get('section_size') == section_size
-                and cached.get('ingest_config',{}).get('vision_limit') == vision_limit):
+                and cached.get('ingest_config',{}).get('vision_limit') == vision_limit
+                and cached.get('ingest_config',{}).get('glyph_repair') == GLYPH_REPAIR):
             return {'cache_hit':True,'pages':len(cached['pages']),'out':str(out),
                     'parser_arbitration':cached.get('parser_arbitration',{})}
     t=time.perf_counter()
-    pages=list(pdf_pages(source) if source.suffix.lower()=='.pdf' else pptx_pages(source))
+    # Hangul drawn with Type3 fonts whose ToUnicode is wrong (macOS Quartz output) extracts
+    # as Latin-1 noise; parse a repaired copy instead. The original's hash stays the identity.
+    glyph_repair={'version':GLYPH_REPAIR,'status':'not_applicable'}
     fallback_pages=[]; arbitration_summary={'comparison_mode':'not_applicable_pptx','pages_compared':0}
     if source.suffix.lower()=='.pdf':
+        import tempfile
+        from glyph_repair import repair_pdf
         from parser_arbitration import arbitrate
-        arb_audit,arbitration_summary=arbitrate(source,pages,parser_mode)
+        # The repaired copy lives only while parsing: it is never stored with the material.
+        with tempfile.TemporaryDirectory(prefix='nit-repair-') as scratch:
+            repaired=Path(scratch)/'source.pdf'
+            glyph_repair=repair_pdf(source,repaired)
+            parse_source=repaired if glyph_repair['status']=='repaired' else source
+            pages=list(pdf_pages(parse_source))
+            arb_audit,arbitration_summary=arbitrate(parse_source,pages,parser_mode)
+        if glyph_repair['status']=='repaired':
+            for p in pages:p['text_recovery']=glyph_repair['version']
         fallback_pages=[x['page'] for x in arb_audit if x['selected_parser']=='pypdf'
                         and x.get('comparison_performed')]
         write_jsonl(out/'parser_arbitration.jsonl',arb_audit)
+    else:
+        pages=list(pptx_pages(source))
 
     from content_roles import annotate_roles
     annotate_roles(pages,source.name)
@@ -328,7 +359,8 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
     document['parser_arbitration']=arbitration_summary
     from canonical_ir import save as save_canonical_ir
     save_canonical_ir(out,document)
-    document['ingest_config']={'section_size':section_size,'vision_limit':vision_limit,'parser_mode':parser_mode}
+    document['ingest_config']={'section_size':section_size,'vision_limit':vision_limit,'parser_mode':parser_mode,'glyph_repair':GLYPH_REPAIR}
+    document['glyph_repair']=glyph_repair
     write_json(cache_path,document)
     private_roles={str(p['page']):[{'id':b['id'],'role':b.get('content_role'),'text':b.get('text','')}
                      for b in p['blocks'] if b.get('content_role') in ('review_question','provided_answer','administrative_appendix','class_operation','break','preview','class_activity_question')]
@@ -347,7 +379,7 @@ def ingest(source,out,vision_limit=None,section_size=8,parser_mode='adaptive'):
     write_jsonl(out/'semantic_jobs.jsonl',sections(pages,section_size,source.name))
     manifest={'schema_version':SCHEMA,'runtime_engine':('pypdf' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else ('pymupdf' if source.suffix.lower()=='.pdf' else 'python-pptx')),
               'verified_executed':True,'lesson_boundaries':doc_lessons,'sha256':sha,'pages':len(pages),'chunks':len(chunks),'vision_jobs':len(jobs),'vision_budget':effective_vision_budget,'ocr_jobs':len(ocr_jobs),'pypdf_recovered_pages':fallback_pages,'parser_arbitration':arbitration_summary,
-              'ingest_config':{'section_size':section_size,'vision_limit':vision_limit,'parser_mode':parser_mode},
+              'ingest_config':{'section_size':section_size,'vision_limit':vision_limit,'parser_mode':parser_mode,'glyph_repair':GLYPH_REPAIR},'glyph_repair':glyph_repair,
               'semantic_jobs':len(sections(pages,section_size,source.name)),
               'native_seconds':round(time.perf_counter()-t,3),
               'state':('LIMITED_TEXT_INDEX_VISUAL_UNKNOWN' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else 'FAST_INDEX_READY_DEEP_PENDING'),'visual_inspection_status':('unknown' if pages and pages[0]['visual_stats'].get('inspection_unavailable') else 'inspected_routing_only'), 'not_done':['AI understanding','OCR/vision for flagged pages','embedding indexing','human QA']}
