@@ -16,6 +16,11 @@ def is_guest(user):
     return user.email.endswith(GUEST_DOMAIN)
 
 
+def model_off_for(owner):
+    """Guest classes run without the model, unless a personal sandbox sets NIT_GUEST_MODEL=1."""
+    return owner is not None and is_guest(owner) and os.getenv("NIT_GUEST_MODEL") != "1"
+
+
 @router.post("/v1/faculty/guest", status_code=201)
 def start_guest(request: Request, response: Response, db: Session = Depends(session)):
     origins = {origin.strip() for origin in os.getenv("NIT_CORS_ORIGINS", "").split(",") if origin.strip()}

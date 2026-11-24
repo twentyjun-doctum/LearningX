@@ -582,11 +582,11 @@ def _recent_texts(db, row, session_id):
 
 def uses_model(db, session) -> bool:
     from . import engine_adapter as nit
-    from .guest import is_guest
+    from .guest import model_off_for
     from .storage import Course, User
     course = db.get(Course, session.course_id)
     owner = db.get(User, course.created_by) if course else None
-    if owner is not None and is_guest(owner):
+    if model_off_for(owner):
         return False
     return nit.model_gateway() is not None
 

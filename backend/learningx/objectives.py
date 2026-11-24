@@ -435,12 +435,12 @@ def interpret_other(text, process=None, support=None, gateway=None):
 @router.post("/materials/{material_id}/objective-profiles/interpret")
 def interpret(material_id: str, data: InterpretIn, db: Session = Depends(session), user: User = Depends(actor)):
     from . import engine_adapter as nit
-    from .guest import is_guest
+    from .guest import model_off_for
     from .storage import Course
 
     material = _material(db, material_id, user)
     owner = db.get(User, db.get(Course, material.course_id).created_by)
-    gateway = None if owner is None or is_guest(owner) else nit.model_gateway()
+    gateway = None if owner is None or model_off_for(owner) else nit.model_gateway()
     return interpret_other(data.text.strip(), data.process, data.support, gateway)
 
 
@@ -462,7 +462,7 @@ def preview(material_id: str, data: PreviewIn, db: Session = Depends(session), u
     from . import engine_adapter as nit
     from . import private_store
     from .classroom import LEVEL_LABEL, LEVEL_MAP
-    from .guest import is_guest
+    from .guest import is_guest, model_off_for
     from .storage import Course
 
     material = _material(db, material_id, user)
@@ -477,7 +477,7 @@ def preview(material_id: str, data: PreviewIn, db: Session = Depends(session), u
     owner = db.get(User, course.created_by)
     # Without a configured model the preview still shows the deterministic answer
     # (process x support stem, diagnosis unassessed) instead of a 503.
-    use_model = not (owner and is_guest(owner)) and nit.model_gateway() is not None
+    use_model = not model_off_for(owner) and nit.model_gateway() is not None
     with private_store.material_workspace(material) as out:
         coaching = nit.coach_question(out, user.id, data.question, course.policy, course.teacher_approved,
                                       use_model=use_model, objective=objective)

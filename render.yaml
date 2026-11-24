@@ -1,34 +1,51 @@
-# Render Blueprint: deploy ONLY LearningX's FastAPI API.
-# The frontend stays on Vercel. PostgreSQL stays on Neon.
+# Render Blueprint for a personal LearningX sandbox (fork).
+# One free Docker web service runs the FastAPI API and the ingestion worker together
+# (backend/start-sandbox.sh). Database and private lesson files live in Neon.
+# The frontend is deployed separately on Vercel from the `frontend` folder.
 services:
   - type: web
-    name: learningx-api
-    runtime: python
+    name: learningx-sandbox-api
+    runtime: docker
     region: singapore
     plan: free
-    rootDir: backend
-    buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn learningx.api:app --host 0.0.0.0 --port $PORT
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    dockerCommand: sh /app/start-sandbox.sh
     healthCheckPath: /health
     autoDeployTrigger: commit
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.12.9
+      # Neon → Connect → connection string (postgresql://...)
       - key: DATABASE_URL
         sync: false
-      - key: NIT_JWT_SECRET
-        generateValue: true
-      - key: NIT_REVIEW_SIGNING_KEY
-        generateValue: true
+      # Neon Object Storage: branch endpoint, region and a storage:read+write credential
+      - key: AWS_ENDPOINT_URL_S3
+        sync: false
+      - key: AWS_REGION
+        sync: false
+      - key: AWS_ACCESS_KEY_ID
+        sync: false
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false
+      - key: NIT_STORAGE_BUCKET
+        value: learningx-lessons
+      # The Vercel address of your frontend, e.g. https://learningx-sandbox.vercel.app
       - key: NIT_CORS_ORIGINS
-        value: https://learning-x-one.vercel.app
-      - key: NIT_LLM_MODEL
-        value: auto
+        sync: false
+      # OpenAI-compatible model endpoint. Leave the URL/key empty to run without AI (fixed coaching).
       - key: NIT_LLM_BASE_URL
         sync: false
       - key: NIT_LLM_API_KEY
         sync: false
-      # Render Free has no persistent disk. Keep real course material ingestion
-      # disabled until a supported private durable storage adapter is installed.
-      - key: NIT_STORAGE_DIR
-        value: /tmp/learningx-lessons
+      - key: NIT_LLM_MODEL
+        value: auto
+      # Sandbox only: guest (no sign-in) classes also use the model.
+      - key: NIT_GUEST_MODEL
+        value: "1"
+      - key: NIT_WORKER_BACKEND
+        value: northflank_poll
+      - key: NIT_JWT_SECRET
+        generateValue: true
+      - key: NIT_REVIEW_SIGNING_KEY
+        generateValue: true
+      - key: NIT_WORKER_SECRET
+        generateValue: true

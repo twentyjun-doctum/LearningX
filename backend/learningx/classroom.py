@@ -31,7 +31,7 @@ from sqlalchemy.orm import Mapped, Session, mapped_column, undefer
 
 from . import engine_adapter as nit
 from . import private_store
-from .guest import is_guest
+from .guest import model_off_for
 from .live_slides import LiveSlide, LiveTransition, QuestionSlide, build_snapshot, cached_live_page, notify, page_pdf, prepare_shared_page, revision, require_preview, source_pdf, visible_pages, wait_for_update, warm_live_pages
 from .live_timing import LiveTimingRoute, record_phase
 from .objectives import coaching_payload, link_latest_profile, session_profile
@@ -381,7 +381,7 @@ def _coach(db, s: ClassSession, user: User, text: str, history: dict | None = No
                 options["history"] = history
             # Guest classes and deployments without a configured model use the deterministic coaching
             # (recorded as unassessed) instead of failing the student's question with a 503.
-            use_model = not (owner and is_guest(owner)) and nit.model_gateway() is not None
+            use_model = not model_off_for(owner) and nit.model_gateway() is not None
             coaching = nit.coach_question(out, user.id, text, c.policy, c.teacher_approved, use_model=use_model, **options)
             proposal = judgments.coaching_decision(coaching)
             if proposal is not None:
