@@ -6,7 +6,7 @@ services:
   - type: web
     name: learningx-sandbox-api
     runtime: docker
-    region: singapore
+    region: ohio
     plan: free
     dockerContext: ./backend
     dockerfilePath: ./backend/Dockerfile
