@@ -118,6 +118,15 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  assert.ok(!texts.includes('얕은') && !texts.includes('중간') && !texts.includes('깊은'), 'no level words for an unassessed answer');
  student.renderCoaching('deep', {follow_up_question: '다른 해석은 무엇일까요?'});
  assert.deepEqual(stages, ['deep'], 'validated levels still move the plant');
+ guideCards.length = 0; messages.length = 0;
+ student.renderCoaching('mid', {feedback: '질문의 근거를 구체화해 보세요.', follow_up_question: '어떤 조건에서 달라질까요?',
+  question_frames: ['공포 소구가 ___ 상황에서 더 효과적인 이유는 무엇일까요?', '공포 소구와 ___를 어떤 기준으로 비교할까요?']});
+ assert.match(guideCards[0].kids[0].attrs.text, /다음 단계 질문 틀/);
+ assert.match(guideCards[0].kids[1].attrs.text, /할 일은 하나/);
+ assert.match(guideCards[0].kids[2].attrs.text, /힌트 · 어떤 조건에서 달라질까요/);
+ assert.deepEqual(guideCards[0].kids.slice(3).map(button => button.kids[0].attrs.text), ['틀 1', '틀 2']);
+ assert.ok(!JSON.stringify(messages).includes('생각해 볼 질문'), 'frames replace the separate follow-up task');
+ console.log('OK: AI question frames become the single next step, with the follow-up as a hint');
  console.log('OK: unassessed questions show no level, keep their own filter and never grow the plant');
 }
 
@@ -713,7 +722,7 @@ console.log('OK: API origin confinement protects invite codes and tokens');
  const drafts = new Map();
  const outcomes = [];
  const ctx = vm.createContext({
-  $, drafts, token: 'test', st: {session: {id: 'class'}}, questionAnchor: null,
+  $, drafts, starters: new Map(), token: 'test', st: {session: {id: 'class'}}, questionAnchor: null,
   liveView: null, pendingAsk: null, draftRead: 0, batchSupported: true, selected: new Map(),
   crypto: {randomUUID: () => String(requests.length)}, updateComposer(){}, paintDrafts(){},
   meMsg(){}, scrollThread(){}, renderCoaching(){}, scheduleDraftPoll(){}, coachMsg(){},

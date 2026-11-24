@@ -109,8 +109,18 @@ MAX_BROWSE_PAGES = 2000
 
 
 def browse_pages(db, session_id: str) -> list[int]:
-    row = db.get(SessionPageAccess, session_id)
-    return json.loads(row.pages) if row else []
+    """Students browse every visible page of the class material on their own; no faculty grant."""
+    s = db.get(ClassSession, session_id)
+    return material_pages(db.get(Material, s.material_id)) if s else []
+
+
+def material_pages(material) -> list[int]:
+    if material is None:
+        return []
+    try:
+        return visible_pages(material)
+    except Exception:  # material still being prepared or its artifacts unavailable
+        return []
 
 
 class SessionParticipant(Base):
@@ -327,10 +337,25 @@ def _student_coaching(coaching: dict) -> dict:
         "follow_up_question": coaching.get("follow_up_question"),
         "feedback": coaching.get("feedback"),
         "evidence_refs": [{"page": r.get("page")} for r in coaching.get("evidence_refs", []) if isinstance(r, dict)],
+        "question_frames": [f for f in coaching.get("question_frames") or [] if isinstance(f, str)][:2],
     }
 
 
-def _coach(db, s: ClassSession, user: User, text: str) -> dict:
+def _coaching_history(db, row) -> dict:
+    """The first question and the last exchange, so the model continues the coaching."""
+    first = db.get(Question, row.question_id)
+    previous = json.loads(row.latest_coaching_json or "{}")
+    turns = db.query(func.count(Revision.id)).filter(Revision.question_id == row.question_id).scalar() or 0
+    history = {"first_question": first.text if first else row.latest_text,
+               "previous_question": row.latest_text, "turn": turns + 2}
+    if previous.get("mode") not in (None, "suitability_blocked"):
+        history["previous_follow_up"] = previous.get("follow_up_question")
+        if previous.get("mode") == "MODEL_VALIDATED":
+            history["previous_level"] = LEVEL_MAP.get(str(previous.get("question_level", "")))
+    return {k: v for k, v in history.items() if v not in (None, "")}
+
+
+def _coach(db, s: ClassSession, user: User, text: str, history: dict | None = None) -> dict:
     m = db.get(Material, s.material_id)
     c = db.get(Course, s.course_id)
     if not m or not c:
@@ -344,11 +369,16 @@ def _coach(db, s: ClassSession, user: User, text: str) -> dict:
         context = {"material": m.id, "material_sha256": m.sha256, "evidence": nit.evidence_fingerprint(out),
                    "course_policy": c.policy, "teacher_approved": bool(c.teacher_approved),
                    "profile": f"{profile.id}:{profile.version}" if profile else None}
+        if history:
+            # The same words mean a different next step in a different conversation.
+            context["history"] = history
         key = judgments.key_for(judgments.COACHING, policy, context, text)
         decided = judgments.recall(db, key)
         if decided is None:
             owner = db.get(User, c.created_by)
             options = {"objective": objective} if objective else {}
+            if history:
+                options["history"] = history
             # Guest classes and deployments without a configured model use the deterministic coaching
             # (recorded as unassessed) instead of failing the student's question with a 503.
             use_model = not (owner and is_guest(owner)) and nit.model_gateway() is not None
@@ -416,13 +446,12 @@ def _public_sessions(db, sessions, faculty=False) -> list[dict]:
                                  "questions_revised": revised, "questions_projected": projected}
     opened = {row.session_id for row in db.query(SessionChatAccess.session_id)
               .filter(SessionChatAccess.session_id.in_(ids), SessionChatAccess.open.is_(True))}
-    browsable = dict(db.query(SessionPageAccess.session_id, SessionPageAccess.pages)
-                     .filter(SessionPageAccess.session_id.in_(ids)))
+    materials = {m.id: m for m in db.query(Material).filter(Material.id.in_({s.material_id for s in sessions}))}
     result = []
     for s in sessions:
         data = {"id": s.id, "course_id": s.course_id, "course_title": titles.get(s.course_id, ""),
                 "status": s.status, "chat_open": s.status != "CLOSED" and s.id in opened,
-                "browse_pages": json.loads(browsable.get(s.id, "[]")) if s.status != "CLOSED" else [],
+                "browse_pages": material_pages(materials.get(s.material_id)) if s.status != "CLOSED" else [],
                 "created_at": _iso(s.created_at), "closed_at": _iso(s.closed_at)}
         if faculty:
             item = stats[s.id]
@@ -633,7 +662,7 @@ def browse_page(session_id: str, page: int, db: Session = Depends(session),
     if current.status == "CLOSED":
         raise HTTPException(409, "Class has ended")
     material = db.get(Material, current.material_id)
-    allowed = visible_pages(material) if faculty else browse_pages(db, session_id)
+    allowed = material_pages(material)
     if page not in allowed:
         raise HTTPException(403, "This page is not open for browsing")
     db.expunge(material)
@@ -1466,12 +1495,14 @@ def _question_response(db, row):
     head, check = fit.current(db, row.id)
     state = fit.effective_check(row.latest_text, check, check.policy_version,
                                 anchored=fit.has_anchor(db, row.id)) if check else None
-    blocked = state and state["status"] == "needs_revision"
+    coaching = json.loads(row.latest_coaching_json)
+    starter = fit.is_starter(state, coaching)
+    blocked = state and state["status"] == "needs_revision" and not starter
     waiting = state and state["status"] == "pending"
     return {"id": row.id, "level": None if blocked or waiting else row.level,
-            "coaching": None if blocked or waiting else _student_coaching(json.loads(row.latest_coaching_json)),
-            "message": fit.REJECTION_MESSAGE if blocked else None,
-            "revision_id": head.revision_id if head else None, "suitability": state}
+            "coaching": None if blocked or waiting else _student_coaching(coaching),
+            "message": fit.REJECTION_MESSAGE if blocked else fit.STARTER_MESSAGE if starter else None,
+            "starter": starter, "revision_id": head.revision_id if head else None, "suitability": state}
 
 
 @router.post("/sessions/{session_id}/questions", status_code=201)
@@ -1488,13 +1519,13 @@ def session_ask(session_id: str, data: SessionAsk, background_tasks: BackgroundT
             return _question_response(db, db.get(SessionQuestion, seen.session_question_id))
     slide = db.get(LiveSlide, session_id)
     page = slide.page if slide else None
-    if data.slide_page is not None and (slide is None or data.slide_page > slide.total):
+    if data.slide_page is not None and data.slide_page not in material_pages(db.get(Material, s.material_id)):
         raise HTTPException(422, "Invalid question slide")
     page = data.slide_page or page
-    if data.anchor and (data.slide_page is None or page not in visible_pages(db.get(Material, s.material_id))):
+    if data.anchor and data.slide_page is None:
         raise HTTPException(422, "Invalid question anchor")
     anchored = bool(data.anchor and data.anchor.quote.strip())
-    coaching = ({"mode": "suitability_blocked"} if fit.intake_reasons(data.question, anchored=anchored)
+    coaching = ({"mode": "suitability_blocked"} if fit.coaching_route(data.question, anchored=anchored) == "block"
                 else _coach(db, s, user, data.question))
     _lock_open(db, s)
     q = Question(course_id=s.course_id, material_id=s.material_id, student_id=user.id,
@@ -1548,8 +1579,8 @@ def session_revise(row_id: str, data: SessionRevise, background_tasks: Backgroun
         raise HTTPException(423, CHAT_LOCKED)
     if row.submitted:
         raise HTTPException(409, "Question already submitted")
-    coaching = ({"mode": "suitability_blocked"} if fit.intake_reasons(data.text, anchored=fit.has_anchor(db, row.id))
-                else _coach(db, s, user, data.text))
+    coaching = ({"mode": "suitability_blocked"} if fit.coaching_route(data.text, anchored=fit.has_anchor(db, row.id)) == "block"
+                else _coach(db, s, user, data.text, _coaching_history(db, row)))
     _lock_open(db, s)
     db.refresh(row, with_for_update=True)  # same order as submits: session row, then question rows
     if row.submitted:
@@ -1693,7 +1724,9 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
     items = []
     for row in rows:
         revision_id, state = drafts[row.id]
-        blocked = not row.submitted and state["status"] == "needs_revision"
+        coaching = json.loads(row.latest_coaching_json)
+        starter = not row.submitted and fit.is_starter(state, coaching)
+        blocked = not row.submitted and state["status"] == "needs_revision" and not starter
         waiting = not row.submitted and state["status"] == "pending"
         show_coaching = not (blocked or waiting)
         items.append({
@@ -1703,8 +1736,9 @@ def mine(session_id: str, db: Session = Depends(session), user: User = Depends(a
             "original": originals[row.question_id] if not blocked else None,
             "submitted": row.submitted, "submitted_at": _iso(row.submitted_at),
             "revision_id": revision_id, "suitability": state,
-            "message": fit.REJECTION_MESSAGE if blocked else None,
-            "coaching": _student_coaching(json.loads(row.latest_coaching_json)) if show_coaching else None,
+            "message": fit.REJECTION_MESSAGE if blocked else fit.STARTER_MESSAGE if starter else None,
+            "starter": starter,
+            "coaching": _student_coaching(coaching) if show_coaching else None,
         })
     return {"session": _public_session(db, s),
             "suitability": {"enforced": True, "policy_version": policy}, "items": items}

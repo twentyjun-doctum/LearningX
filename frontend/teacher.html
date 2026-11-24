@@ -164,7 +164,8 @@
           <p class="sub" id="chat-hint">질문 시간이 되면 열어 주세요. 열기 전에는 학생이 교안만 볼 수 있어요.</p>
         </div>
         <hr>
-        <form class="chat-gate" id="browse-form" novalidate>
+        <p class="sub" id="browse-open-note">학생은 숨기지 않은 교안의 모든 쪽을 자유롭게 넘겨보고, 어느 쪽에서든 문구를 골라 질문할 수 있어요.</p>
+        <form class="chat-gate" id="browse-form" novalidate hidden>
           <div class="row between"><label class="sub" for="browse-pages">학생 교안 열람</label><b id="browse-state">허용 안 함</b></div>
           <input class="input" id="browse-pages" type="text" inputmode="numeric" autocomplete="off" maxlength="400"
             placeholder="예: 1-5, 8" aria-describedby="browse-hint">

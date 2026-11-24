@@ -98,6 +98,19 @@
     }
   };
 
+  // One standalone page with a selectable text layer, so a student can quote any page they browse.
+  window.QU.renderPdfSelectable = async (bytes, width, height, label) => {
+    const pdf = await loadPdf(bytes);
+    try {
+      const frame = await renderPage(pdf, 1, width, height);
+      frame.querySelector('canvas')?.setAttribute('aria-label', label);
+      await frame.textReady;
+      return frame;
+    } finally {
+      pdf.doc.destroy();
+    }
+  };
+
   // Start loading the renderer during entry/review so opening a slide can overlap
   // authentication and network I/O with module loading.
   warmPdf().catch(() => {});

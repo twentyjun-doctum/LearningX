@@ -159,7 +159,7 @@ class SuitabilityTests(unittest.TestCase):
 
         self.gateway = Gateway()
         token = self.student()
-        draft = self.ask(token, "강의 내용을 읽고 왔습니다?")
+        draft = self.ask(token, "ㅋㅋ 대박이네요?")
         self.assertEqual(draft["suitability"]["reason_codes"], ["not_a_question"])
         self.assertEqual(draft["message"], fit.REJECTION_MESSAGE)
         self.assertEqual(self.gateway.calls, [])
@@ -175,10 +175,19 @@ class SuitabilityTests(unittest.TestCase):
         token = self.student()
         for text, reason in (
             ("아무말 아무말 아무말", "not_a_question"),
-            ("고인 모독", "not_a_question"),
-            ("고인 모독은 뭔가요?", "information_only"),
             ("고인 모독 고인 모독 고인 모독, 왜 생기나요?", "disruption"),
             ("사과사과사과사과. 분포는 왜 변하나요?", "disruption"),
+        ):
+            with self.subTest(text=text):
+                draft = self.ask(token, text)
+                self.assertIn(reason, draft["suitability"]["reason_codes"])
+                self.assertEqual(draft["message"], fit.REJECTION_MESSAGE)
+                self.assertIsNone(draft["coaching"])
+                self.assertEqual(self.batch(token, [draft]).status_code, 409)
+        # Seeds of a question: coached with frames, but kept off the board until revised.
+        for text, reason in (
+            ("고인 모독", "not_a_question"),
+            ("고인 모독은 뭔가요?", "information_only"),
             ("그 질문은 어떤가요?", "context_needed"),
             ("음. 이 부분을 다시 설명해 주세요.", "context_needed"),
             ("방금 나온 내용은 어떤가요?", "context_needed"),
@@ -187,8 +196,9 @@ class SuitabilityTests(unittest.TestCase):
             with self.subTest(text=text):
                 draft = self.ask(token, text)
                 self.assertIn(reason, draft["suitability"]["reason_codes"])
-                self.assertEqual(draft["message"], fit.REJECTION_MESSAGE)
-                self.assertIsNone(draft["coaching"])
+                self.assertTrue(draft["starter"])
+                self.assertEqual(draft["message"], fit.STARTER_MESSAGE)
+                self.assertIsNotNone(draft["coaching"])
                 self.assertEqual(self.batch(token, [draft]).status_code, 409)
         self.assertEqual(self.board_texts(), [])
         for text in ("고인 모독 표현은 토론 윤리에서 어떻게 다루나요?",
@@ -227,15 +237,11 @@ class SuitabilityTests(unittest.TestCase):
         self.open_class(guest=True)
         token = self.student()
         cases = {
-            "그건 왜 그렇게 되는 거예요?": "context_needed",
             "교수님, 정말 좋아해요. 평균은 왜 움직이나요?": "confession",
             "저랑 사귀어 주세요!": "confession",
             "옆자리에 앉은 학생은 왜 조용해요?": "student_reference",
             "다른 학생이 이번에 무엇을 냈나요?": "student_reference",
             "민준 학생이 어떤 의견을 냈나요?": "student_reference",
-            "집단극화의 정의를 알려 주세요.": "information_only",
-            "집단극화란 무엇인가요?": "information_only",
-            "프랑스의 수도가 어디인가요?": "information_only",
             "헐": "not_a_question",
         }
         for text, reason in cases.items():
@@ -253,6 +259,27 @@ class SuitabilityTests(unittest.TestCase):
                 saved = self.mine(token)[body["id"]]
                 self.assertIsNone(saved["level_label"])
                 self.assertIsNone(saved["text"])
+                self.assertEqual(self.batch(token, [body]).status_code, 409)
+                blocked = self.req("POST", f"/v1/session-questions/{body['id']}/submit", token)
+                self.assertEqual(blocked.status_code, 409)
+        starters = {
+            "그건 왜 그렇게 되는 거예요?": "context_needed",
+            "집단극화의 정의를 알려 주세요.": "information_only",
+            "집단극화란 무엇인가요?": "information_only",
+            "프랑스의 수도가 어디인가요?": "information_only",
+        }
+        fallback = {"mode": "DETERMINISTIC_FALLBACK", "question_level": "clarify",
+                    "follow_up_question": "어떤 개념을 먼저 확인하면 좋을까요?", "question_frames": []}
+        for text, reason in starters.items():
+            with self.subTest(text=text), patch.object(nit, "coach_question", return_value=fallback) as coach:
+                res = self.req("POST", f"/v1/sessions/{self.session_id}/questions", token, json={"question": text})
+                coach.assert_called_once()
+                self.assertEqual(res.status_code, 201, res.text)
+                body = res.json()
+                self.assertIn(reason, body["suitability"]["reason_codes"])
+                self.assertTrue(body["starter"])
+                self.assertIsNotNone(body["coaching"])
+                self.assertEqual(self.mine(token)[body["id"]]["text"], text)
                 self.assertEqual(self.batch(token, [body]).status_code, 409)
                 blocked = self.req("POST", f"/v1/session-questions/{body['id']}/submit", token)
                 self.assertEqual(blocked.status_code, 409)

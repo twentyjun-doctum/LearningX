@@ -54,13 +54,17 @@
 </section>
 <section class="card student-browse" id="student-browse" aria-labelledby="browse-title" hidden>
   <div class="row between"><div><strong id="browse-title">교안 넘겨보기</strong>
-    <p class="muted small browse-note">교수자가 열어 둔 쪽을 송출 화면과 별개로 볼 수 있어요.</p></div>
+    <p class="muted small browse-note">교안의 모든 쪽을 송출 화면과 별개로 넘겨볼 수 있어요. 글자를 드래그하면 그 부분으로 질문할 수 있어요.</p></div>
     <button class="btn sm" type="button" id="browse-close">닫기</button></div>
   <div class="row browse-nav">
     <button class="btn sm" type="button" id="browse-prev" aria-label="이전 쪽">‹ 이전</button>
     <select class="input sm" id="browse-select" aria-label="볼 쪽 선택"></select>
     <button class="btn sm" type="button" id="browse-next" aria-label="다음 쪽">다음 ›</button>
     <button class="btn sm ghost" type="button" id="browse-live">송출 중인 쪽으로</button>
+  </div>
+  <div class="row live-actions browse-actions-bar">
+    <button type="button" class="btn sm" id="browse-ask">이 쪽으로 질문</button>
+    <span class="muted small" id="browse-feedback" role="status" data-copy-protected></span>
   </div>
   <div class="browse-view" id="browse-view" data-copy-protected></div>
   <p class="muted small" id="browse-status" role="status"></p>

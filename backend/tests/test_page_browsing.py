@@ -77,50 +77,27 @@ class PageBrowsingTests(unittest.TestCase):
         with patch.object(classroom, "page_pdf", return_value=PDF):
             return self.req("GET", f"/v1/sessions/{self.sid}/browse/{n}", token or self.student)
 
-    def test_nothing_is_open_by_default(self):
-        self.assertEqual(self.opened["browse_pages"], [])
-        self.assertEqual(self.joined["session"]["browse_pages"], [])
-        self.assertEqual(self.page(1).status_code, 403)
-
-    def test_faculty_open_chosen_pages_and_students_see_them(self):
-        response = self.allow(pages=[5, 2, 2, 3])
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["browse_pages"], [2, 3, 5])
-        self.assertEqual(response.json()["visible_pages"], [1, 2, 3, 5, 6])
-        self.assertEqual(self.req("GET", f"/v1/sessions/{self.sid}/live", self.student).json()["browse_pages"], [2, 3, 5])
-        self.assertEqual(self.req("GET", f"/v1/sessions/{self.sid}", self.student).json()["browse_pages"], [2, 3, 5])
+    def test_students_browse_every_visible_page_without_a_faculty_grant(self):
+        self.assertEqual(self.opened["browse_pages"], [1, 2, 3, 5, 6])
+        self.assertEqual(self.joined["session"]["browse_pages"], [1, 2, 3, 5, 6])
+        self.assertEqual(self.req("GET", f"/v1/sessions/{self.sid}/live", self.student).json()["browse_pages"], [1, 2, 3, 5, 6])
+        self.assertEqual(self.req("GET", f"/v1/sessions/{self.sid}", self.student).json()["browse_pages"], [1, 2, 3, 5, 6])
         opened = self.page(3)
         self.assertEqual((opened.status_code, opened.content), (200, PDF))
         self.assertEqual(opened.headers["cache-control"], "no-store")
-        for closed in (1, 4, 6, 99):
+        for page in (1, 2, 5, 6):
+            self.assertEqual(self.page(page).status_code, 200, page)
+
+    def test_hidden_and_missing_pages_stay_closed(self):
+        for closed in (4, 7, 99):
             self.assertEqual(self.page(closed).status_code, 403, closed)
 
-    def test_all_opens_every_visible_page_but_never_hidden_ones(self):
-        self.assertEqual(self.allow(all=True).json()["browse_pages"], [1, 2, 3, 5, 6])
-        self.assertEqual(self.page(4).status_code, 403)
+    def test_an_old_faculty_page_list_no_longer_limits_students(self):
+        self.assertEqual(self.allow(pages=[2]).status_code, 200)
+        self.assertEqual(self.page(6).status_code, 200)
         bad = self.allow(pages=[1, 4, 7])
         self.assertEqual(bad.status_code, 422)
         self.assertEqual(bad.json()["detail"], {"code": "PAGES_NOT_AVAILABLE", "pages": [4, 7]})
-
-    def test_up_to_current_opens_the_first_page_through_the_live_page(self):
-        self.assertEqual(self.req("PUT", f"/v1/sessions/{self.sid}/live", self.faculty, json={"page": 5}).status_code, 200)
-        response = self.allow(upto_current=True)
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertEqual(response.json()["browse_pages"], [1, 2, 3, 5], "the hidden page 4 stays closed")
-        self.assertEqual(self.page(5).status_code, 200)
-        self.assertEqual(self.page(6).status_code, 403)
-        # The range follows the live page at the moment the teacher presses it, not afterwards.
-        self.req("PUT", f"/v1/sessions/{self.sid}/live", self.faculty, json={"page": 6})
-        self.assertEqual(self.page(6).status_code, 403)
-        self.assertEqual(self.allow(upto_current=True).json()["browse_pages"], [1, 2, 3, 5, 6])
-
-    def test_faculty_can_revoke(self):
-        self.allow(pages=[1, 2])
-        self.assertEqual(self.allow(pages=[]).json()["browse_pages"], [])
-        self.assertEqual(self.page(1).status_code, 403)
-        with SessionLocal() as db:
-            details = [a.detail for a in db.query(Audit).filter_by(course_id=self.course_id, action="browse_pages_set")]
-        self.assertEqual(sorted(details), ["pages=0", "pages=2"])
 
     def test_only_course_faculty_choose_pages(self):
         self.assertEqual(self.allow(self.student, pages=[1]).status_code, 403)
@@ -131,14 +108,12 @@ class PageBrowsingTests(unittest.TestCase):
 
     def test_browsing_works_while_the_chat_is_locked_and_ends_with_the_class(self):
         self.assertFalse(self.opened["chat_open"])
-        self.allow(pages=[1])
         self.assertEqual(self.page(1).status_code, 200)
         self.req("PUT", f"/v1/sessions/{self.sid}/state", self.faculty, json={"status": "CLOSED"})
         self.assertEqual(self.page(1).status_code, 409)
         self.assertEqual(self.allow(pages=[1]).status_code, 409)
 
     def test_a_token_from_another_class_cannot_browse(self):
-        self.allow(pages=[1])
         with patch.object(nit, "verified_count", return_value=1):
             other = self.req("POST", f"/v1/courses/{self.course_id}/sessions", self.faculty,
                              json={"material_id": self.opened["material_id"]}).json()

@@ -169,6 +169,8 @@
   const EDIT_MULTIPLE_WARNING = '다듬기는 한 번에 하나만 가능해요. 질문을 하나만 선택해 주세요.';
   const REJECTION_MESSAGE = '반응만 적기보다 수업에서 궁금하거나 더 알아보고 싶은 내용을 적어 주세요.';
   const drafts = new Map();
+  // Drafts held back only for being a question seed: coached, revisable, not yet sendable.
+  const starters = new Map();
   const selected = new Map();
   const checking = new Set();
   const requestedLegacyChecks = new Set();
@@ -281,7 +283,11 @@
         }
       }
       drafts.clear();
-      for (const draft of unsent) if (draft.suitability?.status !== 'needs_revision') drafts.set(draft.id, draft);
+      starters.clear();
+      for (const draft of unsent) {
+        if (draft.suitability?.status !== 'needs_revision') drafts.set(draft.id, draft);
+        else if (draft.starter) starters.set(draft.id, draft);
+      }
       st.sentCount = data.items.length - unsent.length;
       updateComposer();
       paintDrafts();
@@ -301,10 +307,13 @@
   }
 
   function showDraftOutcome(draft) {
-    if (draft.suitability?.status === 'needs_revision') {
+    if (draft.suitability?.status === 'needs_revision' && draft.starter && draft.coaching) {
+      coachMsg(el('span', {text: draft.message || '질문의 씨앗이 보여요. 아래 질문 틀로 다듬어 보세요.'}));
+      renderCoaching(draft.level || 'unassessed', draft.coaching, draft);
+    } else if (draft.suitability?.status === 'needs_revision') {
       coachMsg(el('span', {class: 'question-rejection'},
         el('span', {class: 'question-rejection-icon', 'aria-hidden': 'true', text: '!'}),
-        el('span', {text: REJECTION_MESSAGE})));
+        el('span', {text: draft.message || REJECTION_MESSAGE})));
     } else if (draft.suitability?.status === 'eligible') {
       renderCoaching(draft.level, draft.coaching, draft);
     } else if (draft.suitability?.primary_reason === 'check_unavailable') {
@@ -507,6 +516,7 @@
     batchSupported = batchSending = st.sending = false;
     pendingBatch = pendingAsk = null;
     drafts.clear();
+    starters.clear();
     selected.clear();
     checking.clear();
     requestedLegacyChecks.clear();
@@ -522,31 +532,7 @@
     applyBrowse(st.session.browse_pages || []);
     liveView = window.QU.createLiveView({
       api, session: st.session.id, panel: $('student-slide'), initial,
-      onAnchor: ({page, anchor}) => {
-        if (!chatOpen()) return '교수자가 질문 채팅을 열면 이 부분으로 질문할 수 있어요.';
-        if (st.current || st.sending) return false;
-        questionAnchor = {page, anchor};
-        const input = $('q-input');
-        input.placeholder = anchor?.quote ? '“' + anchor.quote + '”에 관해 질문하세요' : page + '쪽에 관해 질문하세요';
-        if (expanded()) {
-          const session = st.session;
-          collapseSlide().then(() => {
-            // Wait for the fullscreen layout to clear before measuring the chat's position.
-            requestAnimationFrame(() => requestAnimationFrame(() => {
-              const coach = $('screen-coach');
-              if (st.session !== session || coach.hidden) return;
-              if (matchMedia('(pointer: fine)').matches) input.focus({preventScroll: true});
-              coach.scrollIntoView({
-                behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
-                block: 'start',
-              });
-            }));
-          });
-        } else {
-          input.focus();
-        }
-        return true;
-      },
+      onAnchor: attachAnchor,
       onState: ({status, chat_open: open, browse_pages: pages, slide}) => {
         if (slide?.page) browse.live = slide.page;
         if (Array.isArray(pages)) applyBrowse(pages);
@@ -558,6 +544,33 @@
         document.getElementById('my-indexed-' + id)?.scrollIntoView({block: 'center'});
       },
     });
+  }
+
+  // A question tied to a page (and optionally a quote) from the live slide or any browsed page.
+  function attachAnchor({page, anchor}) {
+    if (!chatOpen()) return '교수자가 질문 채팅을 열면 이 부분으로 질문할 수 있어요.';
+    if (st.current || st.sending) return false;
+    questionAnchor = {page, anchor: anchor || undefined};
+    const input = $('q-input');
+    input.placeholder = anchor?.quote ? '“' + anchor.quote + '”(' + page + '쪽)에 관해 질문하세요' : page + '쪽에 관해 질문하세요';
+    if (expanded()) {
+      const session = st.session;
+      collapseSlide().then(() => {
+        // Wait for the fullscreen layout to clear before measuring the chat's position.
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          const coach = $('screen-coach');
+          if (st.session !== session || coach.hidden) return;
+          if (matchMedia('(pointer: fine)').matches) input.focus({preventScroll: true});
+          coach.scrollIntoView({
+            behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth',
+            block: 'start',
+          });
+        }));
+      });
+    } else {
+      input.focus();
+    }
+    return true;
   }
 
   function resetThread() {
@@ -638,12 +651,16 @@
       if (res.revision_id) {
         draftRead++;
         batchSupported = true;
-        const draft = {...st.current, revision_id: res.revision_id, suitability: res.suitability, coaching: res.coaching};
+        const draft = {...st.current, revision_id: res.revision_id, suitability: res.suitability, coaching: res.coaching,
+          starter: res.starter === true, message: res.message};
         st.current = null;
         questionAnchor = null;
         $('q-input').placeholder = '궁금한 점을 질문으로 써 보세요';
-        if (draft.suitability?.status === 'needs_revision') drafts.delete(draft.id);
-        else drafts.set(draft.id, draft);
+        starters.delete(draft.id);
+        if (draft.suitability?.status === 'needs_revision') {
+          drafts.delete(draft.id);
+          if (draft.starter) starters.set(draft.id, draft);
+        } else drafts.set(draft.id, draft);
         $('question-batch-status').textContent = '';
         showDraftOutcome(draft);
         scheduleDraftPoll();
@@ -665,13 +682,15 @@
   });
 
   function renderCoaching(level, c, draft) {
+    const frames = frameGuide(c);
     if (level === 'unassessed') {
       // Offer guidance without assigning a level or advancing the plant.
       const parts = [el('span', { class: 'lv unassessed', text: levelText(level) }),
-        el('span', { text: '이번에는 질문 수준을 판정하지 못했어요. 아래 질문을 참고해 다듬어 보세요.' })];
-      if (c && c.follow_up_question) parts.push(el('span', {}, el('b', { text: '생각해 볼 질문 · ' }), c.follow_up_question));
+        el('span', { text: frames ? '이번에는 질문 수준을 판정하지 못했어요. 아래 틀 하나를 골라 빈칸만 채워 보세요.'
+          : '이번에는 질문 수준을 판정하지 못했어요. 아래 질문을 참고해 다듬어 보세요.' })];
+      if (!frames && c && c.follow_up_question) parts.push(el('span', {}, el('b', { text: '생각해 볼 질문 · ' }), c.follow_up_question));
       coachMsg(...parts);
-      renderQuestionGuide({...TEMPLATES.shallow, next: '질문을 한 단계 발전시키기'}, draft);
+      renderQuestionGuide(frames || {...TEMPLATES.shallow, next: '질문을 한 단계 발전시키기'}, draft);
       return;
     }
     const grew = RANK[level] > RANK[st.stage];
@@ -684,7 +703,7 @@
 
     const parts = [el('span', { class: `lv ${level}`, text: levelText(level) })];
     if (c && c.feedback) parts.push(el('span', { text: c.feedback }));
-    if (c && c.follow_up_question) parts.push(el('span', {}, el('b', { text: '생각해 볼 질문 · ' }), c.follow_up_question));
+    if (!frames && c && c.follow_up_question) parts.push(el('span', {}, el('b', { text: '생각해 볼 질문 · ' }), c.follow_up_question));
     if (!c || (!c.feedback && !c.follow_up_question)) {
       parts.push(el('span', { text: level === 'deep' ? '수업 내용을 새로운 상황으로 확장하는 깊은 질문이에요.'
         : '좋은 출발이에요. 한 마디 더 키워 볼까요?' }));
@@ -701,19 +720,30 @@
       return;
     }
     coachMsg(...parts);
-    renderQuestionGuide(TEMPLATES[level], draft);
+    renderQuestionGuide(frames || TEMPLATES[level], draft);
     if (!draft) $('q-input').placeholder = '빈칸(___)을 내 생각으로 채워 다시 보내세요';
+  }
+
+  // The AI's two fill-in frames built from the student's own words; the follow-up becomes their hint.
+  function frameGuide(c) {
+    const frames = (c && Array.isArray(c.question_frames) ? c.question_frames : []).filter(f => typeof f === 'string' && /_{2,}/.test(f)).slice(0, 2);
+    if (!frames.length) return null;
+    return { next: '다음 단계 질문 틀', frames: true, hint: c.follow_up_question || '',
+      items: frames.map((f, i) => [`틀 ${i + 1}`, f]) };
   }
 
   function renderQuestionGuide(guide, draft) {
     if (guide) {
       $('thread').append(el('div', { class: 'opts' },
         el('span', { class: 'k', text: `↑ ${guide.next}` }),
-        el('span', {class: 'muted', text: '빈칸에 교안의 개념, 수업 사례, 판단 기준이나 근거를 넣어 보세요.'}),
+        el('span', {class: 'muted', text: guide.frames ? '할 일은 하나예요. 틀 하나를 골라 빈칸(___)만 내 생각으로 채워 보내세요.'
+          : '빈칸에 교안의 개념, 수업 사례, 판단 기준이나 근거를 넣어 보세요.'}),
+        ...(guide.hint ? [el('span', {class: 'muted hint', text: `힌트 · ${guide.hint}`})] : []),
         ...guide.items.map(([k, tpl]) => el('button', { class: 'opt', type: 'button', onclick: () => {
           if (draft) {
-            const latest = drafts.get(draft.id);
-            if (!latest || latest.revision_id !== draft.revision_id || !selectable(latest)) return;
+            const latest = drafts.get(draft.id) || starters.get(draft.id);
+            if (!latest || latest.revision_id !== draft.revision_id) return;
+            if (!selectable(latest) && !(latest.starter && openForQuestions())) return;
             if (selected.size > 1) $('question-disclosure').open = true;
             if (!editDraft(latest)) return;
           }
@@ -797,8 +827,8 @@
   }
   $('mine-back').addEventListener('click', () => { showScreen('coach'); updateComposer(); });
 
-  /* ---------- 교안 넘겨보기 (교수자가 연 쪽만) ---------- */
-  const browse = { pages: [], page: null, live: null, open: false, request: 0 };
+  /* ---------- 교안 넘겨보기 (숨기지 않은 모든 쪽, 어느 쪽에서든 문구를 골라 질문) ---------- */
+  const browse = { pages: [], page: null, live: null, open: false, request: 0, picked: null };
 
   function applyBrowse(pages) {
     const same = pages.length === browse.pages.length && pages.every((p, i) => p === browse.pages[i]);
@@ -846,22 +876,62 @@
     $('browse-live').hidden = !browse.live || !browse.pages.includes(browse.live) || browse.live === page;
     const request = ++browse.request;
     const view = $('browse-view');
+    browse.picked = null;
+    $('browse-feedback').textContent = '';
+    $('browse-ask').textContent = `${page}쪽으로 질문`;
     $('browse-status').textContent = `${page}쪽을 불러오는 중…`;
     try {
       const bytes = await api(`/v1/sessions/${st.session.id}/browse/${page}`, { raw: true }).then(r => r.arrayBuffer());
       if (request !== browse.request) return;
       const width = Math.max(240, view.clientWidth - 24);
-      const canvas = await window.QU.renderPdfImage(bytes, width, Math.max(320, innerHeight * 0.8), `${page}쪽 교안`);
+      const frame = await window.QU.renderPdfSelectable(bytes, width, Math.max(320, innerHeight * 0.8), `${page}쪽 교안`);
       if (request !== browse.request) return;
-      canvas.addEventListener('contextmenu', e => e.preventDefault());
-      view.replaceChildren(canvas);
+      frame.addEventListener('contextmenu', e => e.preventDefault());
+      view.replaceChildren(frame);
       $('browse-status').textContent = `${page}쪽 · ${index + 1} / ${browse.pages.length}`;
     } catch (err) {
       if (request !== browse.request) return;
       view.replaceChildren();
-      $('browse-status').textContent = err.status === 403 ? '교수자가 이 쪽의 열람을 닫았어요.'
+      $('browse-status').textContent = err.status === 403 ? '이 쪽은 숨겨진 슬라이드라 열 수 없어요.'
         : err.status === 409 ? '수업이 끝나 교안을 볼 수 없어요.' : '교안을 불러오지 못했어요. 잠시 뒤 다시 시도해 주세요.';
     }
+  }
+
+  // The text a student selected on the browsed page, in the same shape as a live-slide quote.
+  function pickBrowseText() {
+    const selection = window.getSelection();
+    const frame = $('browse-view').querySelector('.live-pdf');
+    const layer = frame?.querySelector('.live-pdf-text');
+    if (!selection || selection.isCollapsed || !selection.rangeCount || !layer || !layer.contains(selection.anchorNode)) return;
+    const range = selection.getRangeAt(0).cloneRange();
+    if (!layer.contains(range.startContainer)) range.setStart(layer, 0);
+    if (!layer.contains(range.endContainer)) range.setEnd(layer, layer.childNodes.length);
+    const area = frame.getBoundingClientRect();
+    const hit = range.getBoundingClientRect();
+    const quote = range.toString().replace(/\s+/g, ' ').trim().slice(0, 240);
+    if (!quote || !area.width || !area.height) return;
+    const clamp = value => Math.max(0, Math.min(1, value));
+    const rects = [...range.getClientRects()].map(rect => ({
+      left: clamp((rect.left - area.left) / area.width), top: clamp((rect.top - area.top) / area.height),
+      right: clamp((rect.right - area.left) / area.width), bottom: clamp((rect.bottom - area.top) / area.height),
+    })).filter(rect => rect.right > rect.left && rect.bottom > rect.top).slice(0, 2048);
+    browse.picked = {page: browse.page, anchor: {quote, rects,
+      x: clamp((hit.left + hit.width / 2 - area.left) / area.width),
+      y: clamp((hit.top + hit.height / 2 - area.top) / area.height)}};
+    $('browse-feedback').textContent = `선택: “${quote}”`;
+    $('browse-ask').textContent = '이 부분으로 질문';
+  }
+  document.addEventListener('selectionchange', () => { if (browse.open) pickBrowseText(); });
+
+  function askFromBrowse() {
+    if (browse.page == null) return;
+    pickBrowseText();
+    const picked = browse.picked?.page === browse.page ? browse.picked : {page: browse.page, anchor: null};
+    const accepted = attachAnchor(picked);
+    $('browse-feedback').textContent = accepted === true
+      ? (picked.anchor ? `${picked.page}쪽 “${picked.anchor.quote}”에 질문을 붙여요. 아래 채팅창에 질문을 써 주세요.` : `${picked.page}쪽에 질문을 붙여요.`)
+      : typeof accepted === 'string' ? accepted : '지금 작성 중인 질문을 먼저 마무리해 주세요.';
+    if (accepted === true) $('screen-coach').scrollIntoView({block: 'start', behavior: matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
   }
 
   function stepBrowse(delta) {
@@ -871,6 +941,7 @@
 
   $('browse-open').addEventListener('click', () => (browse.open ? closeBrowse() : openBrowse()));
   $('browse-close').addEventListener('click', closeBrowse);
+  $('browse-ask').addEventListener('click', askFromBrowse);
   $('browse-prev').addEventListener('click', () => stepBrowse(-1));
   $('browse-next').addEventListener('click', () => stepBrowse(1));
   $('browse-live').addEventListener('click', () => showBrowsePage(browse.live));

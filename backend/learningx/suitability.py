@@ -34,6 +34,10 @@ POLICY_VERSION = "suitability-v1"
 # Version of the classifier prompt below; part of the root decision ledger key.
 MODEL_PROMPT_VERSION = "suitability-prompt-v1"
 REJECTION_MESSAGE = "반응만 적기보다 수업에서 궁금하거나 더 알아보고 싶은 내용을 적어 주세요."
+# Reasons that still carry the seed of a question: the student gets coaching and
+# question frames, and the draft reaches the board only after a revision passes.
+STARTER_REASONS = frozenset(("not_a_question", "context_needed", "information_only"))
+STARTER_MESSAGE = "질문의 씨앗이 보여요. 아래 질문 틀 하나를 골라 빈칸을 채우면 교수자에게 보낼 수 있어요."
 STATUSES = ("pending", "eligible", "needs_revision")
 MODEL_REASONS = ("off_topic", "targeted_attack", "personal_or_private", "disruption",
                  "dismissive_mockery", "reaction_only", "context_needed",
@@ -328,6 +332,45 @@ def intake_reasons(text: str, recent_texts=(), *, anchored=False) -> list[str]:
     if not has_question_form(text):
         return ["not_a_question"]
     return rule_reasons(text, recent_texts, anchored=anchored)
+
+
+_SUBSTANCE_WORD = re.compile(r"[가-힣A-Za-z0-9]{2,}")
+# Exclamations that carry a reaction, not something to ask about.
+_REACTION_WORD = re.compile(r"(?:와+|헐+|오+|우와+|대박\S*|진짜|정말|완전|너무|굿|짱\S*|좋아요|좋네요|재밌\S*|신기\S*|웃기\S*|ㅇㅇ)")
+
+
+def _has_substance(text: str) -> bool:
+    """At least a few letters of content beyond laughter, sighs and reactions."""
+    visible = _visible_text(text)
+    if _NOISE.fullmatch(visible.strip() or "?"):
+        return False
+    words = [w for w in _SUBSTANCE_WORD.findall(visible)
+             if not re.fullmatch(r"[ㅋㅎㅠㅜ]+", w) and not _REACTION_WORD.fullmatch(w)]
+    return len("".join(words)) >= 4
+
+
+def coaching_route(text: str, *, anchored=False) -> str:
+    """'coach' (a question), 'starter' (coach, board after revision) or 'block' (no coaching)."""
+    reasons = intake_reasons(text, anchored=anchored)
+    if not reasons:
+        return "coach"
+    if reasons == ["not_a_question"]:
+        content = rule_reasons(text, anchored=anchored)
+        if any(code not in STARTER_REASONS for code in content):
+            return "block"
+        if expression_reason(text) or not _has_substance(text):
+            return "block"
+        return "starter"
+    return "starter" if set(reasons) <= STARTER_REASONS else "block"
+
+
+def is_starter(state: dict | None, coaching: dict | None) -> bool:
+    """A draft held back only for starter reasons that already has coaching to show."""
+    if not state or state.get("status") != "needs_revision":
+        return False
+    codes = set(state.get("reason_codes") or ())
+    return bool(codes) and codes <= STARTER_REASONS and bool(coaching) and \
+        coaching.get("mode") not in (None, "suitability_blocked")
 
 
 def _missing_context(sentences) -> bool:
